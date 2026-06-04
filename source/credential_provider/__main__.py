@@ -16,6 +16,7 @@ import platform
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1945,9 +1946,47 @@ class MultiProviderAuth:
             self._debug_print(f"Silent refresh failed, will require browser auth: {e}")
             return None, None, None
 
+    def _ensure_daemon_running(self) -> None:
+        """Spawn the credential daemon if it is not already running."""
+        install_dir = Path.home() / "claude-code-with-bedrock"
+        daemon_pid_file = install_dir / "daemon.pid"
+
+        # Check if daemon is already running
+        if daemon_pid_file.exists():
+            try:
+                pid = int(daemon_pid_file.read_text().strip())
+                os.kill(pid, 0)
+                self._debug_print(f"Daemon already running pid={pid}")
+                return
+            except (ValueError, ProcessLookupError, PermissionError):
+                daemon_pid_file.unlink(missing_ok=True)
+
+        # Spawn daemon detached from this process
+        self._debug_print("Spawning credential daemon...")
+        credential_process = install_dir / "credential-process"
+        if not credential_process.exists():
+            self._debug_print("credential-process binary not found, cannot spawn daemon")
+            return
+
+        env = {**os.environ, "CCWB_PROFILE": self.profile}
+        try:
+            subprocess.Popen(
+                [str(credential_process), "--profile", self.profile, "--daemon"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._debug_print("Daemon spawned")
+        except Exception as e:
+            self._debug_print(f"Failed to spawn daemon: {e}")
+
     def run(self):
         """Main execution flow"""
         try:
+            # Ensure the credential daemon (otelcol manager + heartbeat) is running
+            self._ensure_daemon_running()
+
             # Check cache first
             cached = self.get_cached_credentials()
             if cached:
@@ -2107,6 +2146,11 @@ def main():
         help="Refresh credentials if expired (for cron jobs with session storage)",
     )
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run as the credential daemon (manages otelcol lifecycle and emits heartbeat metrics)",
+    )
+    parser.add_argument(
         "--set-client-secret",
         action="store_true",
         default=False,
@@ -2118,6 +2162,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Handle --daemon: run as the credential daemon
+    if args.daemon:
+        from credential_provider.daemon import main as daemon_main
+        daemon_main()
+        return
 
     # Handle --set-client-secret before loading full auth config.
     # Secrets must never be passed as CLI arguments — they appear in shell history
