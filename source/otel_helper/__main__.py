@@ -208,7 +208,7 @@ def extract_user_info(payload):
     }
 
 
-def format_as_headers_dict(attributes):
+def format_as_headers_dict(attributes, token=None):
     """Format attributes as headers dictionary for JSON output"""
     # Map attributes to HTTP headers expected by OTEL collector
     # Note: Headers must be lowercase to match OTEL collector configuration
@@ -229,6 +229,9 @@ def format_as_headers_dict(attributes):
     for attr_key, header_name in header_mapping.items():
         if attr_key in attributes and attributes[attr_key]:
             headers[header_name] = attributes[attr_key]
+
+    if token:
+        headers["authorization"] = f"Bearer {token}"
 
     return headers
 
@@ -637,7 +640,7 @@ def run_proxy(target_url: str, port: int = 4318):
             caller_identity = get_aws_caller_identity()
             user_info = create_anonymous_user_info(caller_identity)
 
-        return format_as_headers_dict(user_info)
+        return format_as_headers_dict(user_info, token=token)
 
     # Pre-fetch headers once at startup; refresh on each request so token
     # rotations are picked up without restarting the proxy.
@@ -830,7 +833,7 @@ def main():
             user_info = create_anonymous_user_info(caller_identity)
 
         # Generate headers dictionary
-        headers_dict = format_as_headers_dict(user_info)
+        headers_dict = format_as_headers_dict(user_info, token=token)
         # In test mode, print detailed output
         if TEST_MODE:
             print("===== TEST MODE OUTPUT =====\n")

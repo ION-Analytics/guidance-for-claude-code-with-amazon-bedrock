@@ -56,6 +56,13 @@ processors:
       - key: deployment.environment
         value: "production"
         action: insert
+  transform/add_start_time:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          # If startTimeUnixNano is omitted or 0, match it to the current data point's timestamp
+          - set(start_time_unix_nano, time_unix_nano) where start_time_unix_nano == nil or start_time_unix_nano == 0        
 
 exporters:
   otlphttp:

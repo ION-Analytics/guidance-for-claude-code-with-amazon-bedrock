@@ -127,7 +127,8 @@ def update_quota_metrics(usage_data):
             if daily_reset:
                 update_expr += " SET daily_tokens = :delta, daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
             else:
-                update_expr += ", daily_tokens :delta SET last_updated = :ts, #ttl = :ttl, email = :email"
+                # Adding 'daily_date = :date' here satisfies the DynamoDB validator constraint safely
+                update_expr += ", daily_tokens :delta SET daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
 
             quota_table.update_item(
                 Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"},
