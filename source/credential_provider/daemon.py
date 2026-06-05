@@ -78,9 +78,29 @@ def _otelcol_running() -> bool:
 
 
 
+def _collector_credentials_valid() -> bool:
+    """Check if collector profile creds in ~/.aws/credentials are still valid."""
+    import configparser
+    profile = _profile()
+    collector_profile = f"{profile}-collector"
+    creds_file = Path.home() / ".aws" / "credentials"
+    try:
+        config = configparser.ConfigParser(inline_comment_prefixes=())
+        config.read(creds_file)
+        if collector_profile not in config:
+            return False
+        exp = config[collector_profile].get("x-expiration")
+        if not exp:
+            return False
+        exp_time = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        return (exp_time - datetime.now(timezone.utc)).total_seconds() > 30
+    except Exception:
+        return False
+
+
 def _sts_valid() -> bool:
-    """Check credentials are still valid by reading expiry from ~/.aws/credentials."""
-    return _credentials_cached()
+    """Check both main and collector credentials are still valid."""
+    return _credentials_cached() and _collector_credentials_valid()
 
 
 def _credentials_cached() -> bool:
@@ -307,6 +327,10 @@ def _run_loop() -> None:
 
     while True:
         now = time.time()
+
+        # Start otelcol as soon as credentials become available (every tick)
+        if not _otelcol_running() and _credentials_cached():
+            _start_otelcol()
 
         # Periodic credential + health check
         if now - last_check >= INTERVAL:
