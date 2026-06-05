@@ -2255,14 +2255,13 @@ EOF
     echo "  ✓ Created AWS profile '$PROFILE_NAME'"
 
     # Create a companion collector profile for the OTel sidecar.
-    # The main profile caches static creds in ~/.aws/credentials for performance,
-    # which shadows credential_process for other SDKs. The collector profile has
-    # no entry in ~/.aws/credentials, so the Go SDK always calls credential_process.
+    # The daemon mirrors fresh credentials into ~/.aws/credentials under this
+    # profile so otelcol reads static creds directly — no credential_process
+    # subprocess, avoiding PyInstaller temp dir issues.
     COLLECTOR_PROFILE="${{PROFILE_NAME}}-collector"
     sed -i.bak "/\\[profile $COLLECTOR_PROFILE\\]/,/^$/d" ~/.aws/config 2>/dev/null || true
     cat >> ~/.aws/config << EOF
 [profile $COLLECTOR_PROFILE]
-credential_process = $HOME/claude-code-with-bedrock/credential-process --profile $PROFILE_NAME
 region = $PROFILE_REGION
 EOF
     echo "  ✓ Created collector profile '$COLLECTOR_PROFILE'"

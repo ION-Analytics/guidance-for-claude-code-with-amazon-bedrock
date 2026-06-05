@@ -30,7 +30,6 @@ CACHE_DIR = Path.home() / ".claude-code-session"
 DAEMON_PID_FILE = INSTALL_DIR / "daemon.pid"
 COLLECTOR_PID_FILE = INSTALL_DIR / "collector.pid"
 LOG_FILE = CACHE_DIR / "daemon.log"
-OTELCOL_HEALTH_URL = "http://localhost:13133/"
 OTLP_ENDPOINT = "http://localhost:4318/v1/metrics"
 
 logging.basicConfig(
@@ -78,50 +77,83 @@ def _otelcol_running() -> bool:
         return False
 
 
-def _otelcol_healthy() -> bool:
-    try:
-        with urllib.request.urlopen(OTELCOL_HEALTH_URL, timeout=5) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
 
 def _sts_valid() -> bool:
+    """Check credentials are still valid by reading expiry from ~/.aws/credentials."""
+    return _credentials_cached()
+
+
+def _credentials_cached() -> bool:
+    """Check if valid credentials are already in the cache file — avoids calling
+    credential-process recursively when the daemon is itself spawned by it."""
     profile = _profile()
-    env = {**os.environ, "AWS_PROFILE": f"{profile}-collector"}
-    # Strip inherited credential env vars to avoid shadowing credential_process
-    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-                "AWS_SESSION_EXPIRATION", "AWS_CREDENTIAL_EXPIRATION"):
-        env.pop(var, None)
+    creds_file = Path.home() / ".aws" / "credentials"
     try:
-        result = subprocess.run(
-            ["aws", "sts", "get-caller-identity"],
-            env=env, capture_output=True, timeout=15,
-        )
-        return result.returncode == 0
+        import configparser
+        config = configparser.ConfigParser(inline_comment_prefixes=())
+        config.read(creds_file)
+        if profile not in config:
+            return False
+        exp = config[profile].get("x-expiration")
+        if not exp:
+            return False
+        from datetime import datetime, timezone
+        exp_time = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        return (exp_time - datetime.now(timezone.utc)).total_seconds() > 30
     except Exception:
         return False
 
 
-def _warm_credentials() -> None:
+def _write_collector_credentials() -> None:
+    """Mirror main profile credentials into the collector profile in ~/.aws/credentials.
+
+    otelcol reads static creds directly from this file — no credential_process
+    subprocess needed, avoiding PyInstaller temp dir issues.
+    """
+    import configparser
+    import tempfile
+
     profile = _profile()
-    cp = _credential_process()
-    if not cp.exists():
-        return
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-                        "AWS_SESSION_TOKEN", "AWS_SESSION_EXPIRATION",
-                        "AWS_CREDENTIAL_EXPIRATION")}
-    stable_tmp = INSTALL_DIR / "tmp"
-    stable_tmp.mkdir(exist_ok=True)
-    env["TMPDIR"] = str(stable_tmp)
+    collector_profile = f"{profile}-collector"
+    creds_file = Path.home() / ".aws" / "credentials"
+
     try:
-        subprocess.run(
-            [str(cp), "--profile", profile],
-            env=env, capture_output=True, timeout=30,
-        )
+        config = configparser.ConfigParser(inline_comment_prefixes=())
+        config.read(creds_file)
+
+        if profile not in config:
+            log.warning("no credentials found for profile %s, cannot write collector creds", profile)
+            return
+
+        src = config[profile]
+        if src.get("aws_access_key_id") == "EXPIRED":
+            log.warning("credentials for %s are expired, skipping collector write", profile)
+            return
+
+        config[collector_profile] = {
+            "aws_access_key_id": src.get("aws_access_key_id", ""),
+            "aws_secret_access_key": src.get("aws_secret_access_key", ""),
+            "aws_session_token": src.get("aws_session_token", ""),
+        }
+        if src.get("x-expiration"):
+            config[collector_profile]["x-expiration"] = src["x-expiration"]
+
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_file.parent, prefix=".credentials.", suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                config.write(f)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, creds_file)
+            log.info("wrote collector credentials for %s", collector_profile)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            raise
     except Exception as e:
-        log.warning("credential warm failed: %s", e)
+        log.warning("failed to write collector credentials: %s", e)
 
 
 def _start_otelcol() -> None:
@@ -134,18 +166,16 @@ def _start_otelcol() -> None:
     profile = _profile()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    _warm_credentials()
+    if not _credentials_cached():
+        log.warning("no cached credentials found, deferring otelcol start until credentials available")
+        return
+    _write_collector_credentials()
 
     env = {k: v for k, v in os.environ.items()
            if k not in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
                         "AWS_SESSION_TOKEN", "AWS_SESSION_EXPIRATION",
                         "AWS_CREDENTIAL_EXPIRATION")}
     env["AWS_PROFILE"] = f"{profile}-collector"
-    # Use a stable TMPDIR so macOS doesn't clean up PyInstaller's extraction
-    # directory while credential-process is running as a subprocess of otelcol.
-    stable_tmp = INSTALL_DIR / "tmp"
-    stable_tmp.mkdir(exist_ok=True)
-    env["TMPDIR"] = str(stable_tmp)
 
     log_file = open(CACHE_DIR / "collector.log", "a")
     proc = subprocess.Popen(
@@ -270,17 +300,10 @@ def _run_loop() -> None:
     last_check = 0.0
 
     # Ensure otelcol is running at startup
-    if not _otelcol_running() or not _otelcol_healthy():
+    if not _otelcol_running():
         log.info("otelcol not running at startup, starting")
         _start_otelcol()
-        # Wait up to 15s for healthy
-        for _ in range(15):
-            time.sleep(1)
-            if _otelcol_healthy():
-                log.info("otelcol healthy")
-                break
-        else:
-            log.warning("otelcol did not become healthy within 15s")
+        time.sleep(3)  # brief pause for otelcol to initialise
 
     while True:
         now = time.time()
@@ -290,9 +313,8 @@ def _run_loop() -> None:
             last_check = now
             cred_check_file.write_text(str(int(now)))
 
-            if not _otelcol_running() or not _otelcol_healthy():
-                log.info("otelcol unhealthy, restarting")
-                _stop_otelcol()
+            if not _otelcol_running():
+                log.info("otelcol not running, attempting start")
                 _start_otelcol()
             elif not _sts_valid():
                 log.info("STS check failed, refreshing credentials and restarting otelcol")
@@ -305,8 +327,12 @@ def _run_loop() -> None:
                     )
                 except Exception as e:
                     log.warning("clear-cache failed: %s", e)
+                _write_collector_credentials()
                 _stop_otelcol()
                 _start_otelcol()
+            else:
+                # Credentials still valid — keep collector profile in sync
+                _write_collector_credentials()
 
             # Send heartbeat
             email = _read_email()

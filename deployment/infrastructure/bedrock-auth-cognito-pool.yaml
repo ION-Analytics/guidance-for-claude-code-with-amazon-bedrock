@@ -155,6 +155,7 @@ Resources:
               Effect: Allow
               Action:
                 - 'cloudwatch:PutMetricData'
+                - 'aps:RemoteWrite'
               Resource: '*'
             - !Ref 'AWS::NoValue'
 
