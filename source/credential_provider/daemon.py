@@ -4,7 +4,7 @@ Credential daemon — manages otelcol lifecycle and emits a heartbeat metric.
 Spawned by credential-process if not already running. Runs as a detached
 background process; owns the otelcol PID file and credential refresh cycle.
 
-Heartbeat metric: sends `claude_code_daemon_heartbeat` (value=1) to the local
+Heartbeat metric: sends `claude_code.daemon.heartbeat` (value=1) to the local
 otelcol OTLP receiver (localhost:4318) every INTERVAL seconds. otelcol forwards
 it to the CloudWatch Prometheus endpoint with SigV4, co-located with gen_ai
 usage metrics. Absence of the metric for >10 min indicates otelcol bypass.
@@ -21,6 +21,10 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+import configparser
+
+import boto3
 
 # Interval between health checks and heartbeat emissions (seconds)
 INTERVAL = 300  # 5 minutes
@@ -109,7 +113,6 @@ def _credentials_cached() -> bool:
     profile = _profile()
     creds_file = Path.home() / ".aws" / "credentials"
     try:
-        import configparser
         config = configparser.ConfigParser(inline_comment_prefixes=())
         config.read(creds_file)
         if profile not in config:
@@ -117,7 +120,6 @@ def _credentials_cached() -> bool:
         exp = config[profile].get("x-expiration")
         if not exp:
             return False
-        from datetime import datetime, timezone
         exp_time = datetime.fromisoformat(exp.replace("Z", "+00:00"))
         return (exp_time - datetime.now(timezone.utc)).total_seconds() > 30
     except Exception:
@@ -226,7 +228,7 @@ def _stop_otelcol() -> None:
 # ---------------------------------------------------------------------------
 
 def _build_otlp_heartbeat(email: str, ts_ns: int) -> bytes:
-    """Build a minimal OTLP protobuf payload for claude_code_daemon_heartbeat.
+    """Build a minimal OTLP protobuf payload for claude_code.daemon.heartbeat.
 
     Encodes the ExportMetricsServiceRequest manually using raw protobuf
     encoding (field tag + wire type + value) to avoid a protobuf dependency.
@@ -234,7 +236,7 @@ def _build_otlp_heartbeat(email: str, ts_ns: int) -> bytes:
     Schema:
       gauge{ datapoints=[{ as_double=1.0, time_unix_nano=ts_ns,
                attributes=[{key="user.email", value=email}] }] }
-      metric{ name="claude_code_daemon_heartbeat", gauge=... }
+      metric{ name="claude_code.daemon.heartbeat", gauge=... }
       scope_metrics{ metrics=[metric] }
       resource_metrics{ scope_metrics=[scope_metrics] }
       ExportMetricsServiceRequest{ resource_metrics=[resource_metrics] }
@@ -281,8 +283,8 @@ def _build_otlp_heartbeat(email: str, ts_ns: int) -> bytes:
     # Gauge { data_points=[datapoint] }
     gauge = ldelim(1, datapoint)
 
-    # Metric { name="claude_code_daemon_heartbeat", gauge=gauge }
-    metric = string_field(1, "claude_code_daemon_heartbeat") + ldelim(5, gauge)
+    # Metric { name="claude_code.daemon.heartbeat", gauge=gauge }
+    metric = string_field(1, "claude_code.daemon.heartbeat") + ldelim(5, gauge)
 
     # ScopeMetrics { metrics=[metric] }
     scope_metrics = ldelim(3, metric)
@@ -308,6 +310,114 @@ def _send_heartbeat(email: str) -> None:
             log.info("heartbeat sent for %s status=%d", email, resp.status)
     except Exception as e:
         log.warning("heartbeat send failed: %s", e)
+
+    # Also send directly to CloudWatch via boto3 — bypasses the local otelcol
+    # entirely so a user disabling otelcol cannot suppress this signal.
+    # The quota Lambda correlates this against otelcol token usage to detect
+    # collector bypass.
+    _send_cloudwatch_heartbeat(email)
+
+
+def _send_cloudwatch_heartbeat(email: str) -> None:
+    """Send heartbeat directly to CloudWatch via SigV4-signed HTTP, bypassing local otelcol.
+
+    Uses urllib + manual SigV4 signing (no botocore data files required) so this
+    works correctly inside a PyInstaller bundle. Credentials read directly from
+    ~/.aws/credentials which the daemon keeps fresh.
+    Namespace: ClaudeCode/Security, queryable separately from OTel metrics.
+    """
+    import hashlib
+    import hmac
+    import urllib.parse
+
+    try:
+        profile = _profile()
+        region = os.environ.get("AWS_REGION", "eu-west-1")
+
+        creds_file = Path.home() / ".aws" / "credentials"
+        config = configparser.ConfigParser(inline_comment_prefixes=())
+        config.read(creds_file)
+        if profile not in config:
+            log.warning("no credentials for direct CW heartbeat")
+            return
+
+        creds = config[profile]
+        access_key = creds.get("aws_access_key_id", "")
+        secret_key = creds.get("aws_secret_access_key", "")
+        session_token = creds.get("aws_session_token", "")
+        if not access_key or access_key == "EXPIRED":
+            log.warning("credentials expired, skipping direct CW heartbeat")
+            return
+
+        # Build PutMetricData request body
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = now.strftime("%Y%m%d")
+        host = f"monitoring.{region}.amazonaws.com"
+        endpoint = f"https://{host}/"
+
+        body = urllib.parse.urlencode({
+            "Action": "PutMetricData",
+            "Version": "2010-08-01",
+            "Namespace": "ClaudeCode/Security",
+            "MetricData.member.1.MetricName": "CollectorHeartbeat",
+            "MetricData.member.1.Value": "1.0",
+            "MetricData.member.1.Unit": "Count",
+            "MetricData.member.1.Dimensions.member.1.Name": "UserEmail",
+            "MetricData.member.1.Dimensions.member.1.Value": email,
+        })
+
+        # SigV4 signing
+        def sign(key: bytes, msg: str) -> bytes:
+            return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+        def get_signature_key(key: str, date: str, region: str, service: str) -> bytes:
+            k_date = sign(("AWS4" + key).encode("utf-8"), date)
+            k_region = sign(k_date, region)
+            k_service = sign(k_region, service)
+            return sign(k_service, "aws4_request")
+
+        payload_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        headers_to_sign = {
+            "content-type": "application/x-www-form-urlencoded",
+            "host": host,
+            "x-amz-date": amz_date,
+        }
+        if session_token:
+            headers_to_sign["x-amz-security-token"] = session_token
+
+        canonical_headers = "".join(f"{k}:{v}\n" for k, v in sorted(headers_to_sign.items()))
+        signed_headers = ";".join(sorted(headers_to_sign.keys()))
+        canonical_request = "\n".join([
+            "POST", "/", "",
+            canonical_headers, signed_headers, payload_hash,
+        ])
+
+        credential_scope = f"{date_stamp}/{region}/monitoring/aws4_request"
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256", amz_date, credential_scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ])
+
+        signing_key = get_signature_key(secret_key, date_stamp, region, "monitoring")
+        signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        auth_header = (
+            f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+
+        req_headers = {**headers_to_sign, "Authorization": auth_header}
+        req = urllib.request.Request(
+            endpoint,
+            data=body.encode("utf-8"),
+            headers=req_headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.info("direct CW heartbeat sent for %s status=%d", email, resp.status)
+
+    except Exception as e:
+        log.warning("direct CW heartbeat failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
