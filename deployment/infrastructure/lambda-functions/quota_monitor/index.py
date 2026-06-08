@@ -28,6 +28,20 @@ MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "300000000"))
 WARNING_THRESHOLD_80 = int(os.environ.get("WARNING_THRESHOLD_80", "240000000"))
 WARNING_THRESHOLD_90 = int(os.environ.get("WARNING_THRESHOLD_90", "270000000"))
 
+# Bedrock EU cross-region inference pricing (USD per million tokens)
+# Source: https://aws.amazon.com/bedrock/pricing/ — Europe (Ireland), Global Cross-region Inference
+# Defaults to Claude Sonnet 4.6 pricing (most commonly used model).
+# Override via env vars if fleet shifts to a different model mix.
+#
+# Model reference:
+#   Sonnet 4.6/4.5/4.0: input $3.00, output $15.00, cache_read $0.30, cache_write_5m $3.75
+#   Haiku 4.5:          input $1.00, output  $5.00, cache_read $0.10, cache_write_5m $1.25
+#   Opus 4.8/4.7/4.6:   input $5.00, output $25.00, cache_read $0.50, cache_write_5m $6.25
+PRICE_INPUT_PER_M = float(os.environ.get("PRICE_INPUT_PER_M", "3.00"))
+PRICE_OUTPUT_PER_M = float(os.environ.get("PRICE_OUTPUT_PER_M", "15.00"))
+PRICE_CACHE_READ_PER_M = float(os.environ.get("PRICE_CACHE_READ_PER_M", "0.30"))
+PRICE_CACHE_WRITE_PER_M = float(os.environ.get("PRICE_CACHE_WRITE_PER_M", "3.75"))
+
 # DynamoDB tables
 quota_table = dynamodb.Table(QUOTA_TABLE)
 policies_table = dynamodb.Table(POLICIES_TABLE) if POLICIES_TABLE else None
@@ -106,6 +120,15 @@ def fetch_usage_from_promql():
     return users
 
 
+def calculate_cost(input_tokens, output_tokens, cache_tokens):
+    """Calculate USD cost from token counts using configured per-million prices."""
+    return (
+        (input_tokens * PRICE_INPUT_PER_M / 1_000_000) +
+        (output_tokens * PRICE_OUTPUT_PER_M / 1_000_000) +
+        (cache_tokens * PRICE_CACHE_READ_PER_M / 1_000_000)
+    )
+
+
 def update_quota_metrics(usage_data):
     """Atomically increment UserQuotaMetrics with delta from PromQL (like old MetricsAggregator)."""
     now = datetime.now(timezone.utc)
@@ -118,17 +141,22 @@ def update_quota_metrics(usage_data):
         if delta <= 0:
             continue
         try:
+            inp = int(usage.get("input_tokens", 0))
+            out = int(usage.get("output_tokens", 0))
+            cache = int(usage.get("cache_tokens", 0))
+            cost_delta = calculate_cost(inp, out, cache)
+
             # Check if daily_date changed (new day = reset daily counter)
             response = quota_table.get_item(Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"})
             existing = response.get("Item", {})
             daily_reset = existing.get("daily_date") != current_date
 
-            update_expr = "ADD total_tokens :delta, input_tokens :inp, output_tokens :out, cache_tokens :cache"
+            update_expr = "ADD total_tokens :delta, input_tokens :inp, output_tokens :out, cache_tokens :cache, total_cost :cost"
             if daily_reset:
-                update_expr += " SET daily_tokens = :delta, daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
+                update_expr += " SET daily_tokens = :delta, daily_cost = :cost, daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
             else:
                 # Adding 'daily_date = :date' here satisfies the DynamoDB validator constraint safely
-                update_expr += ", daily_tokens :delta SET daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
+                update_expr += ", daily_tokens :delta, daily_cost :cost SET daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
 
             quota_table.update_item(
                 Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"},
@@ -136,9 +164,10 @@ def update_quota_metrics(usage_data):
                 ExpressionAttributeNames={"#ttl": "ttl"},
                 ExpressionAttributeValues={
                     ":delta": Decimal(str(int(delta))),
-                    ":inp": Decimal(str(int(usage.get("input_tokens", 0)))),
-                    ":out": Decimal(str(int(usage.get("output_tokens", 0)))),
-                    ":cache": Decimal(str(int(usage.get("cache_tokens", 0)))),
+                    ":inp": Decimal(str(inp)),
+                    ":out": Decimal(str(out)),
+                    ":cache": Decimal(str(cache)),
+                    ":cost": Decimal(str(round(cost_delta, 6))),
                     ":date": current_date,
                     ":ts": now.isoformat().replace("+00:00", "Z"),
                     ":ttl": ttl,

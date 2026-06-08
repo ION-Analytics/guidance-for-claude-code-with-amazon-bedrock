@@ -136,6 +136,43 @@ def lambda_handler(event, context):
 
         monthly_limit = policy.get("monthly_token_limit", 0)
         daily_limit = policy.get("daily_token_limit")
+        monthly_cost_limit = policy.get("monthly_cost_limit")  # USD, optional
+        daily_cost_limit = policy.get("daily_cost_limit")      # USD, optional
+
+        total_cost = usage.get("total_cost", 0.0)
+        daily_cost = usage.get("daily_cost", 0.0)
+
+        # Check monthly cost limit (takes precedence over token limit if configured)
+        if monthly_cost_limit and monthly_cost_limit > 0 and total_cost >= monthly_cost_limit:
+            return build_response(200, {
+                "allowed": False,
+                "reason": "monthly_cost_exceeded",
+                "enforcement_mode": enforcement_mode,
+                "usage": usage_summary,
+                "policy": {
+                    "type": policy.get("policy_type"),
+                    "identifier": policy.get("identifier")
+                },
+                "unblock_status": {"is_unblocked": False},
+                "message": f"Monthly cost limit exceeded: ${total_cost:.2f} / ${monthly_cost_limit:.2f} ({total_cost/monthly_cost_limit*100:.1f}%). Contact your administrator for assistance."
+            })
+
+        # Check daily cost limit
+        if daily_cost_limit and daily_cost_limit > 0 and daily_cost >= daily_cost_limit:
+            daily_mode = policy.get("daily_enforcement_mode", "alert")
+            if daily_mode == "block":
+                return build_response(200, {
+                    "allowed": False,
+                    "reason": "daily_cost_exceeded",
+                    "enforcement_mode": enforcement_mode,
+                    "usage": usage_summary,
+                    "policy": {
+                        "type": policy.get("policy_type"),
+                        "identifier": policy.get("identifier")
+                    },
+                    "unblock_status": {"is_unblocked": False},
+                    "message": f"Daily cost limit exceeded: ${daily_cost:.2f} / ${daily_cost_limit:.2f} ({daily_cost/daily_cost_limit*100:.1f}%). Resets at UTC midnight."
+                })
 
         # Check monthly token limit
         if monthly_limit > 0 and monthly_tokens >= monthly_limit:
@@ -268,11 +305,15 @@ def resolve_quota_for_user(email: str, groups: list) -> dict | None:
     """
     if not ENABLE_FINEGRAINED_QUOTAS and MONTHLY_TOKEN_LIMIT > 0:
         # Return default limits from environment
+        monthly_cost_limit = os.environ.get("MONTHLY_COST_LIMIT")
+        daily_cost_limit = os.environ.get("DAILY_COST_LIMIT")
         return {
             "policy_type": "default",
             "identifier": "environment",
             "monthly_token_limit": MONTHLY_TOKEN_LIMIT,
             "daily_token_limit": DAILY_TOKEN_LIMIT if DAILY_TOKEN_LIMIT > 0 else None,
+            "monthly_cost_limit": float(monthly_cost_limit) if monthly_cost_limit else None,
+            "daily_cost_limit": float(daily_cost_limit) if daily_cost_limit else None,
             "warning_threshold_80": WARNING_THRESHOLD_80,
             "warning_threshold_90": WARNING_THRESHOLD_90,
             "enforcement_mode": MONTHLY_ENFORCEMENT_MODE,
@@ -322,6 +363,8 @@ def get_policy(policy_type: str, identifier: str) -> dict | None:
             "identifier": item.get("identifier"),
             "monthly_token_limit": int(item.get("monthly_token_limit", 0)),
             "daily_token_limit": int(item.get("daily_token_limit", 0)) if item.get("daily_token_limit") else None,
+            "monthly_cost_limit": float(item["monthly_cost_limit"]) if item.get("monthly_cost_limit") else None,
+            "daily_cost_limit": float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
             "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
             "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
             "enforcement_mode": item.get("enforcement_mode", "alert"),
@@ -385,16 +428,19 @@ def get_user_usage(email: str) -> dict:
                 "daily_date": current_date,
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "cache_tokens": 0
+                "cache_tokens": 0,
+                "total_cost": 0.0,
+                "daily_cost": 0.0,
             }
 
         # Check if daily tokens need to be reset (different day)
         daily_date = item.get("daily_date")
         daily_tokens = float(item.get("daily_tokens", 0))
+        daily_cost = float(item.get("daily_cost", 0))
 
         if daily_date != current_date:
-            # Day has changed, daily tokens should be 0 for the new day
             daily_tokens = 0
+            daily_cost = 0.0
 
         return {
             "total_tokens": float(item.get("total_tokens", 0)),
@@ -402,7 +448,9 @@ def get_user_usage(email: str) -> dict:
             "daily_date": daily_date,
             "input_tokens": float(item.get("input_tokens", 0)),
             "output_tokens": float(item.get("output_tokens", 0)),
-            "cache_tokens": float(item.get("cache_tokens", 0))
+            "cache_tokens": float(item.get("cache_tokens", 0)),
+            "total_cost": float(item.get("total_cost", 0)),
+            "daily_cost": daily_cost,
         }
     except Exception as e:
         print(f"Error getting usage for {email}: {e}")
@@ -424,16 +472,31 @@ def build_usage_summary(usage: dict, policy: dict) -> dict:
     monthly_limit = policy.get("monthly_token_limit", 0)
     daily_limit = policy.get("daily_token_limit")
 
+    monthly_cost_limit = policy.get("monthly_cost_limit")
+    daily_cost_limit = policy.get("daily_cost_limit")
+    total_cost = usage.get("total_cost", 0.0)
+    daily_cost = usage.get("daily_cost", 0.0)
+
     summary = {
         "monthly_tokens": int(monthly_tokens),
         "monthly_limit": monthly_limit,
         "monthly_percent": round(monthly_tokens / monthly_limit * 100, 1) if monthly_limit > 0 else 0,
-        "daily_tokens": int(daily_tokens)
+        "daily_tokens": int(daily_tokens),
+        "total_cost": round(total_cost, 4),
+        "daily_cost": round(daily_cost, 4),
     }
+
+    if monthly_cost_limit:
+        summary["monthly_cost_limit"] = monthly_cost_limit
+        summary["monthly_cost_percent"] = round(total_cost / monthly_cost_limit * 100, 1) if monthly_cost_limit > 0 else 0
 
     if daily_limit:
         summary["daily_limit"] = daily_limit
         summary["daily_percent"] = round(daily_tokens / daily_limit * 100, 1) if daily_limit > 0 else 0
+
+    if daily_cost_limit:
+        summary["daily_cost_limit"] = daily_cost_limit
+        summary["daily_cost_percent"] = round(daily_cost / daily_cost_limit * 100, 1) if daily_cost_limit > 0 else 0
 
     return summary
 

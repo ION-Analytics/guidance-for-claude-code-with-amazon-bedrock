@@ -76,7 +76,7 @@ service:
   extensions: [sigv4auth]
   telemetry:
     logs:
-      level: info
+      level: debug
       output_paths: [stderr]
   pipelines:
     metrics:

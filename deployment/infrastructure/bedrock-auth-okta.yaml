@@ -149,6 +149,10 @@ Resources:
               Action:
                 - 'cloudwatch:PutMetricData'
                 - 'aps:RemoteWrite'
+                - 'aps:QueryMetrics'
+                - 'aps:GetSeries'
+                - 'aps:GetLabels'
+                - 'aps:GetMetricMetadata'
               Resource: '*'
             - !Ref 'AWS::NoValue'
 
