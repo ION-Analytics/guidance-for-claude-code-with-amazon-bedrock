@@ -180,6 +180,53 @@ def update_quota_metrics(usage_data):
     print(f"Updated UserQuotaMetrics for {len(usage_data)} users")
 
 
+def publish_cost_metrics(usage_data):
+    """Publish per-user monthly and daily cost to CloudWatch for dashboard visibility.
+
+    Namespace: ClaudeCode/Usage
+    Metrics: UserMonthlyCost, UserDailyCost
+    Dimension: UserEmail
+    """
+    if not usage_data:
+        return
+
+    cw = boto3.client("cloudwatch")
+    metric_data = []
+
+    for email, usage in usage_data.items():
+        total_cost = usage.get("total_cost", 0)
+        daily_cost = usage.get("daily_cost", 0)
+        if total_cost <= 0 and daily_cost <= 0:
+            continue
+        dimensions = [{"Name": "UserEmail", "Value": email}]
+        if total_cost > 0:
+            metric_data.append({
+                "MetricName": "UserMonthlyCost",
+                "Dimensions": dimensions,
+                "Value": round(total_cost, 4),
+                "Unit": "None",
+            })
+        if daily_cost > 0:
+            metric_data.append({
+                "MetricName": "UserDailyCost",
+                "Dimensions": dimensions,
+                "Value": round(daily_cost, 4),
+                "Unit": "None",
+            })
+
+    # CloudWatch PutMetricData accepts max 1000 metrics per call
+    for i in range(0, len(metric_data), 1000):
+        try:
+            cw.put_metric_data(
+                Namespace="ClaudeCode/Usage",
+                MetricData=metric_data[i:i+1000],
+            )
+        except Exception as e:
+            print(f"Error publishing cost metrics to CloudWatch: {e}")
+
+    print(f"Published cost metrics for {len(usage_data)} users to CloudWatch/Usage")
+
+
 def lambda_handler(event, context):
     """Fetch usage from PromQL, update DynamoDB, check quotas, send alerts."""
     print(f"Starting quota monitoring at {datetime.now(timezone.utc).isoformat()}")
@@ -202,7 +249,7 @@ def lambda_handler(event, context):
         usage_data = {}
         response = quota_table.scan(
             FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
-            ProjectionExpression="email, total_tokens, daily_tokens",
+            ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost",
         )
         for item in response.get("Items", []):
             email = item.get("email")
@@ -210,11 +257,13 @@ def lambda_handler(event, context):
                 usage_data[email] = {
                     "total_tokens": float(item.get("total_tokens", 0)),
                     "daily_tokens": float(item.get("daily_tokens", 0)),
+                    "total_cost": float(item.get("total_cost", 0)),
+                    "daily_cost": float(item.get("daily_cost", 0)),
                 }
         while "LastEvaluatedKey" in response:
             response = quota_table.scan(
                 FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
-                ProjectionExpression="email, total_tokens, daily_tokens",
+                ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost",
                 ExclusiveStartKey=response["LastEvaluatedKey"],
             )
             for item in response.get("Items", []):
@@ -223,6 +272,8 @@ def lambda_handler(event, context):
                     usage_data[email] = {
                         "total_tokens": float(item.get("total_tokens", 0)),
                         "daily_tokens": float(item.get("daily_tokens", 0)),
+                        "total_cost": float(item.get("total_cost", 0)),
+                        "daily_cost": float(item.get("daily_cost", 0)),
                     }
 
         if not usage_data:
@@ -275,6 +326,9 @@ def lambda_handler(event, context):
         if alerts_to_send:
             send_alerts(alerts_to_send)
             print(f"Sent {len(alerts_to_send)} alerts")
+
+        # Publish per-user cost metrics to CloudWatch for dashboard visibility
+        publish_cost_metrics(usage_data)
 
         print(f"Summary - Total: {stats['total_users']}, Over 80%: {stats['over_80']}, Over 90%: {stats['over_90']}, Exceeded: {stats['exceeded']}")
         return {"statusCode": 200, "body": json.dumps(stats)}

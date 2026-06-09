@@ -326,6 +326,34 @@ Resources:
                 "yAxis": { "left": { "min": 0 } }, "view": "timeSeries", "stacked": false,
                 "region": "${MetricsRegion}"
               }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 56, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SELECT MAX(UserMonthlyCost) FROM \"ClaudeCode/Usage\" GROUP BY UserEmail", "id": "monthly_cost", "region": "${MetricsRegion}" } ]
+                ],
+                "period": 900,
+                "title": "Monthly Cost per User (USD)",
+                "yAxis": { "left": { "min": 0, "label": "USD" } },
+                "view": "bar", "stacked": false,
+                "region": "${MetricsRegion}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 56, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SELECT MAX(UserDailyCost) FROM \"ClaudeCode/Usage\" GROUP BY UserEmail", "id": "daily_cost", "region": "${MetricsRegion}" } ]
+                ],
+                "period": 900,
+                "title": "Daily Cost per User (USD)",
+                "yAxis": { "left": { "min": 0, "label": "USD" } },
+                "view": "bar", "stacked": false,
+                "region": "${MetricsRegion}"
+              }
             }
           ]
         }

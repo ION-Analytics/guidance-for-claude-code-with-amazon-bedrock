@@ -13,6 +13,11 @@ import html as html_module
 import json
 import os
 import platform
+
+# Disable awscrt before boto3 import — awscrt native DLLs are not bundled
+# in the PyInstaller/Nuitka executable and cause "Missing Dependency" errors
+# on Windows when botocore auto-detects and attempts to load them.
+os.environ.setdefault("AWS_CRT_ENABLED", "false")
 import re
 import secrets
 import socket
