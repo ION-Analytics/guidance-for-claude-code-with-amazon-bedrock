@@ -211,9 +211,14 @@ def publish_cost_metrics(usage_data):
     cw = boto3.client("cloudwatch")
     metric_data = []
 
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     for email, usage in usage_data.items():
         total_cost = usage.get("total_cost", 0)
         daily_cost = usage.get("daily_cost", 0)
+        # If the usage record is from a previous day, treat daily cost as 0
+        if usage.get("daily_date") and usage["daily_date"] != current_date:
+            daily_cost = 0
         if total_cost <= 0 and daily_cost <= 0:
             continue
         dimensions = [{"Name": "UserEmail", "Value": email.lower()}]
@@ -224,13 +229,13 @@ def publish_cost_metrics(usage_data):
                 "Value": round(total_cost, 4),
                 "Unit": "None",
             })
-        if daily_cost > 0:
-            metric_data.append({
-                "MetricName": "UserDailyCost",
-                "Dimensions": dimensions,
-                "Value": round(daily_cost, 4),
-                "Unit": "None",
-            })
+        # Always publish daily cost (including 0) so stale values are overwritten
+        metric_data.append({
+            "MetricName": "UserDailyCost",
+            "Dimensions": dimensions,
+            "Value": round(daily_cost, 4),
+            "Unit": "None",
+        })
 
     # CloudWatch PutMetricData accepts max 1000 metrics per call
     for i in range(0, len(metric_data), 1000):
@@ -267,7 +272,7 @@ def lambda_handler(event, context):
         usage_data = {}
         response = quota_table.scan(
             FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
-            ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost",
+            ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost, daily_date",
         )
         for item in response.get("Items", []):
             email = item.get("email")
@@ -277,11 +282,12 @@ def lambda_handler(event, context):
                     "daily_tokens": float(item.get("daily_tokens", 0)),
                     "total_cost": float(item.get("total_cost", 0)),
                     "daily_cost": float(item.get("daily_cost", 0)),
+                    "daily_date": item.get("daily_date"),
                 }
         while "LastEvaluatedKey" in response:
             response = quota_table.scan(
                 FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
-                ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost",
+                ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost, daily_date",
                 ExclusiveStartKey=response["LastEvaluatedKey"],
             )
             for item in response.get("Items", []):
@@ -292,6 +298,7 @@ def lambda_handler(event, context):
                         "daily_tokens": float(item.get("daily_tokens", 0)),
                         "total_cost": float(item.get("total_cost", 0)),
                         "daily_cost": float(item.get("daily_cost", 0)),
+                        "daily_date": item.get("daily_date"),
                     }
 
         if not usage_data:
@@ -554,7 +561,7 @@ def get_sent_alerts(month_name):
                 parts = item["sk"].split("#")
                 if len(parts) >= 5:
                     email, atype, alevel = parts[2], parts[3], parts[4]
-                    if atype == "daily" and len(parts) >= 6:
+                    if atype in ("daily", "daily_cost") and len(parts) >= 6:
                         sent.add(f"{email}#{atype}#{parts[5]}#{alevel}")
                     else:
                         sent.add(f"{email}#{atype}#{alevel}")
@@ -567,7 +574,7 @@ def record_sent_alert(month_name, email, alert_type, alert_level, alert_data):
     """Record sent alert to prevent duplicates."""
     try:
         month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
-        if alert_type == "daily":
+        if alert_type in ("daily", "daily_cost"):
             date = alert_data.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
             sk = f"{month_prefix}#ALERT#{email}#{alert_type}#{alert_level}#{date}"
         else:
@@ -591,12 +598,40 @@ def send_alerts(alerts):
     for alert in alerts:
         try:
             level_prefix = {"warning": "WARNING", "critical": "CRITICAL", "exceeded": "EXCEEDED"}.get(alert["alert_level"], "ALERT")
-            type_label = {"monthly": "Monthly Token Quota", "daily": "Daily Token Quota"}.get(alert["alert_type"], "Quota")
+            alert_type = alert["alert_type"]
+            is_cost = alert_type in ("monthly_cost", "daily_cost")
+
+            type_label = {
+                "monthly": "Monthly Token Quota",
+                "daily": "Daily Token Quota",
+                "monthly_cost": "Monthly Cost Quota",
+                "daily_cost": "Daily Cost Quota",
+            }.get(alert_type, "Quota")
+
             subject = f"Claude Code {level_prefix} - {type_label} - {alert['percentage']:.0f}%"
-            message = (f"USER: {alert['user']}\nALERT: {type_label} - {alert['alert_level'].upper()}\n"
-                       f"Usage: {alert['current_usage']:,} / {alert['limit']:,} ({alert['percentage']:.1f}%)\n"
-                       f"Policy: {alert.get('policy_info', 'default')}\n"
-                       f"Enforcement: {alert.get('enforcement_mode', 'alert')}")
+
+            if is_cost:
+                usage_str = f"${alert['current_usage']:.4f} / ${alert['limit']:.2f} ({alert['percentage']:.1f}%)"
+            else:
+                usage_str = f"{int(alert['current_usage']):,} / {int(alert['limit']):,} tokens ({alert['percentage']:.1f}%)"
+
+            lines = [
+                f"User:        {alert['user']}",
+                f"Alert:       {type_label} - {alert['alert_level'].upper()}",
+                f"Usage:       {usage_str}",
+                f"Policy:      {alert.get('policy_info', 'default')}",
+                f"Enforcement: {alert.get('enforcement_mode', 'alert')}",
+            ]
+
+            if alert_type == "monthly_cost" and alert.get("projected_total") is not None:
+                lines.append(f"Projected:   ${alert['projected_total']:.2f} this month ({alert.get('days_remaining', '?')} days remaining)")
+            elif alert_type == "monthly" and alert.get("projected_total") is not None:
+                lines.append(f"Projected:   {int(alert['projected_total']):,} tokens ({alert.get('days_remaining', '?')} days remaining)")
+
+            if alert.get("date"):
+                lines.append(f"Date:        {alert['date']} (daily limit resets at UTC midnight)")
+
+            message = "\n".join(lines)
             sns_client.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=message)
         except Exception as e:
             print(f"Error sending alert for {alert['user']}: {e}")

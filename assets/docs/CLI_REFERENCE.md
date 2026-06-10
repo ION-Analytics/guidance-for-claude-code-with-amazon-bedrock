@@ -655,18 +655,25 @@ poetry run ccwb quota set-user <email> [options]
 ```
 
 **Arguments:**
-- `<email>` - User's email address
+- `<email>` - User's email address (automatically normalised to lowercase)
 
 **Options:**
 - `--monthly-limit, -m <tokens>` - Monthly token limit (supports K, M, B suffixes: 10M = 10,000,000)
 - `--daily-limit, -d <tokens>` - Daily token limit (optional)
+- `--monthly-cost-limit <usd>` - Monthly cost limit in USD (e.g. `30.00`)
+- `--daily-cost-limit <usd>` - Daily cost limit in USD (e.g. `4.00`)
 - `--enforcement, -e <mode>` - Enforcement mode: `alert` (monitor only) or `block` (deny access)
 - `--disabled` - Create policy in disabled state
 - `--profile, -p <name>` - Configuration profile
 
 **Example:**
 ```bash
-poetry run ccwb quota set-user alice@example.com -m 5M -e block
+# Token limits only
+poetry run ccwb quota set-user alice@example.com -m 500M -d 20M -e block
+
+# With cost limits
+poetry run ccwb quota set-user alice@example.com -m 500M -d 20M \
+  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 -e block
 ```
 
 ### `quota set-group` - Set Group Quota
@@ -685,7 +692,7 @@ poetry run ccwb quota set-group <group> [options]
 
 **Example:**
 ```bash
-poetry run ccwb quota set-group engineering -m 20M -d 1M -e alert
+poetry run ccwb quota set-group engineering -m 400M -d 20M --monthly-cost-limit 150.00 -e alert
 ```
 
 ### `quota set-default` - Set Default Quota
@@ -701,12 +708,13 @@ poetry run ccwb quota set-default [options]
 
 **Example:**
 ```bash
-poetry run ccwb quota set-default -m 225M -e alert
+poetry run ccwb quota set-default -m 225M -d 8M \
+  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 -e block
 ```
 
 ### `quota list` - List Policies
 
-Lists all quota policies.
+Lists all quota policies, including token and cost limits.
 
 ```bash
 poetry run ccwb quota list [options]
@@ -715,6 +723,8 @@ poetry run ccwb quota list [options]
 **Options:**
 - `--type <type>` - Filter by type: `user`, `group`, or `default`
 - `--profile, -p <name>` - Configuration profile
+
+The table includes columns for Monthly Tokens, Daily Tokens, Monthly Cost, and Daily Cost. Cost columns show `-` when no cost limit is set.
 
 ### `quota delete` - Delete Policy
 
@@ -752,17 +762,19 @@ poetry run ccwb quota show <email> [options]
 
 ### `quota usage` - Show Usage
 
-Shows current usage against quota limits for a user.
+Shows current usage against quota limits for a user, including token counts and cost in USD.
 
 ```bash
 poetry run ccwb quota usage <email> [options]
 ```
 
 **Arguments:**
-- `<email>` - User's email address
+- `<email>` - User's email address (automatically normalised to lowercase)
 
 **Options:**
 - `--profile, -p <name>` - Configuration profile
+
+Displays a table with rows for Monthly Tokens, Daily Tokens, Monthly Cost, and Daily Cost (cost rows are shown only when a cost limit is configured). Each row shows current usage, limit, and colour-coded percentage.
 
 ### `quota unblock` - Unblock User
 

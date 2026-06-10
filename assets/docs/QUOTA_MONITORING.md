@@ -1,41 +1,49 @@
 # Claude Code Quota Monitoring
 
-Quota monitoring tracks user token consumption and sends automated alerts when usage thresholds are exceeded, helping administrators manage costs and prevent unexpected overages.
+Quota monitoring tracks user token and cost consumption, sending automated alerts when usage thresholds are exceeded and optionally blocking credential issuance when limits are reached.
 
 ## Overview
 
-The quota monitoring system is an optional CloudFormation stack that integrates with the dashboard stack to track monthly token consumption per user and send SNS alerts at configurable thresholds.
+The quota monitoring system is an optional CloudFormation stack that tracks per-user token and cost consumption against configurable limits. Usage data is sourced from Bedrock model invocation logs — a server-side data source that captures all Claude Code clients (CLI, VS Code extension, Claude Desktop, browser) without requiring any client-side telemetry configuration.
 
 ### Key Features
 
-- **Per-user token tracking**: Monthly and daily consumption monitoring for each authenticated user
+- **Server-side data source**: Reads from the `bedrock-model-invocation` CloudWatch log group — captures usage from all Bedrock clients automatically
+- **Per-user token and cost tracking**: Monthly and daily consumption monitoring with token and USD cost limits
 - **Fine-grained quota policies**: Set limits at user, group, or default levels with precedence rules
-- **Multiple limit types**: Monthly tokens and daily tokens
+- **Multiple limit types**: Monthly tokens, daily tokens, monthly cost (USD), daily cost (USD)
 - **Configurable thresholds**: Alerts at 80%, 90%, and 100% of limits
 - **JWT group integration**: Automatically extract group membership from identity provider claims
 - **Alert deduplication**: One alert per threshold per limit type per user per period
 - **DynamoDB storage**: Efficient tracking with automatic TTL cleanup
+- **Real-time blocking**: Credential issuance denied at auth time when limits exceeded
+- **Visual notifications**: Progress bars with cost and token data in both browser popup and terminal
 
 ### Architecture Components
 
-- **UserQuotaMetrics Table**: DynamoDB table storing monthly/daily usage totals with token type breakdown
-- **QuotaPolicies Table**: DynamoDB table storing fine-grained quota policies (user/group/default)
-- **Quota Monitor Lambda**: Scheduled function checking thresholds every 15 minutes
+- **UserQuotaMetrics Table**: DynamoDB table storing monthly/daily usage totals with token type breakdown and cost
+- **QuotaPolicies Table**: DynamoDB table storing fine-grained quota policies (user/group/default) with token and cost limits
+- **Quota Monitor Lambda** (`quota_monitor`): Runs every 15 minutes — queries `bedrock-model-invocation` log group via CloudWatch Logs Insights, updates DynamoDB, checks thresholds, sends SNS alerts, and publishes CloudWatch metrics
+- **Quota Check Lambda** (`quota_check`): Real-time check called at credential issuance time — validates token and cost usage against the effective policy
 - **SNS Topic**: Alert delivery to administrators
 - **EventBridge Rule**: Lambda scheduling
-- **Metrics Aggregator Integration**: Updates quota table during metric processing
+- **API Gateway**: Secured HTTP endpoint for real-time quota checks
 
 ## Configuration
 
-> **Prerequisites**: Monitoring must be enabled and the dashboard stack deployed. See the [CLI Reference](CLI_REFERENCE.md#deploy---deploy-infrastructure) for deployment details.
+> **Prerequisites**: Quota monitoring requires the `bedrock-model-invocation` log group to be enabled in your AWS account. This is a Bedrock account-level setting. See the [Bedrock model invocation logging docs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-invocation-logging.html) for setup instructions.
 
-During `ccwb init`, quota monitoring is **enabled by default** when monitoring is enabled. You'll be prompted to configure:
+During `ccwb init`, quota monitoring is configured as part of the optional features section. You'll be prompted to configure:
 - Monthly token limit per user (default: 225 million tokens)
 - Automatic threshold calculation (80% warning at 180M, 90% critical at 202.5M)
 - Daily token limit with burst buffer (auto-calculated from monthly)
 - Enforcement modes for daily and monthly limits
 
+Cost limits (`--monthly-cost-limit`, `--daily-cost-limit`) are set per policy using the `ccwb quota` CLI commands after deployment — they are not set during `ccwb init`.
+
 Deploy using `poetry run ccwb deploy` (deploys all enabled stacks) or `poetry run ccwb deploy quota` for just the quota stack. The OIDC configuration is automatically passed from your profile settings. For complete deployment instructions, see the [CLI Reference](CLI_REFERENCE.md#deploy---deploy-infrastructure).
+
+> **Important**: After deploying or updating the quota stack, set `ENABLE_FINEGRAINED_QUOTAS=true` on both the `quota_monitor` and `quota_check` Lambda functions to enable fine-grained policy support. This is done automatically by `ccwb deploy quota` when fine-grained quotas are enabled in your profile.
 
 ## Configuration Settings
 
@@ -50,9 +58,31 @@ Deploy using `poetry run ccwb deploy` (deploys all enabled stacks) or `poetry ru
 | Critical Threshold      | 90% (202.5M)| Second alert level                             |
 | Check Frequency         | 15 minutes  | Lambda execution interval                      |
 | Alert Retention         | 60 days     | DynamoDB TTL for deduplication                 |
-| EnableFinegrainedQuotas | false       | Enable fine-grained policy support             |
+| EnableFinegrainedQuotas | false       | Enable fine-grained policy support (must be true to use per-policy cost limits) |
 
 To update limits: Re-run `ccwb init` and redeploy with `ccwb deploy quota`.
+
+### Data Source: Bedrock Model Invocation Logs
+
+The quota monitor reads usage from the `bedrock-model-invocation` CloudWatch log group rather than from client-side OTLP telemetry. This approach:
+
+- **Captures all clients** — CLI, VS Code extension, Claude Desktop, API calls — without any client-side configuration
+- **Is authoritative** — server-side data cannot be bypassed or spoofed by the client
+- **Provides cost data** — input/output/cache token counts are available per invocation, enabling accurate USD cost calculation
+
+The Lambda queries this log group using CloudWatch Logs Insights every 15 minutes, looking back a configurable window to aggregate token counts per user and model. User identity is extracted from the IAM session name in the `identity.arn` field — for federated users, this is the email address.
+
+### Per-Model Pricing (EU, as of June 2026)
+
+The quota monitor uses these prices to compute USD cost from token counts:
+
+| Model   | Input (per 1M) | Output (per 1M) | Cache Read | Cache Write |
+|---------|---------------|----------------|------------|-------------|
+| Opus    | $5.00         | $25.00         | $0.50      | $6.25       |
+| Sonnet  | $3.00         | $15.00         | $0.30      | $3.75       |
+| Haiku   | $1.00         | $5.00          | $0.10      | $1.25       |
+
+Prices are configurable in the Lambda code (`quota_monitor/index.py`) if your region uses different rates.
 
 ## Daily Limits and Bill Shock Protection
 
@@ -131,43 +161,51 @@ When determining the effective quota for a user:
 
 ### Limit Types
 
-Each policy can configure two types of limits:
+Each policy can configure four types of limits:
 
-| Limit Type           | Description                        | Reset Period     |
-| -------------------- | ---------------------------------- | ---------------- |
-| Monthly Token Limit  | Maximum tokens per calendar month  | 1st of each month|
-| Daily Token Limit    | Maximum tokens per day             | UTC midnight     |
+| Limit Type           | Description                              | Reset Period      |
+| -------------------- | ---------------------------------------- | ----------------- |
+| Monthly Token Limit  | Maximum tokens per calendar month        | 1st of each month |
+| Daily Token Limit    | Maximum tokens per day                   | UTC midnight      |
+| Monthly Cost Limit   | Maximum USD spend per calendar month     | 1st of each month |
+| Daily Cost Limit     | Maximum USD spend per day                | UTC midnight      |
+
+Cost limits are checked before token limits. If a cost limit is exceeded, the user is blocked regardless of their token count.
 
 ### Managing Policies with CLI
 
 Use the `ccwb quota` commands to manage policies:
 
 ```bash
-# Set a user-specific policy
-ccwb quota set-user john.doe@company.com --monthly-limit 500M --daily-limit 20M
+# Set a user-specific policy with token and cost limits
+ccwb quota set-user john.doe@company.com --monthly-limit 500M --daily-limit 20M \
+  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 --enforcement block
 
 # Set a group policy
-ccwb quota set-group engineering --monthly-limit 400M
+ccwb quota set-group engineering --monthly-limit 400M --monthly-cost-limit 150.00
 
 # Set the default policy for all users
-ccwb quota set-default --monthly-limit 225M --daily-limit 8M
+ccwb quota set-default --monthly-limit 225M --daily-limit 8M \
+  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 --enforcement block
 
-# List all policies
+# List all policies (shows token and cost limits)
 ccwb quota list
 ccwb quota list --type group
 
-# Show effective policy for a user
-ccwb quota show john.doe@company.com --groups "engineering,ml-team"
+# Show effective policy for a user (resolves user > group > default)
+ccwb quota show john.doe@company.com
 
-# View current usage against limits
+# View current usage against limits (tokens and cost)
 ccwb quota usage john.doe@company.com
 
 # Delete a policy
 ccwb quota delete group engineering
 
-# Temporarily unblock a user who exceeded quota (Phase 2)
+# Temporarily unblock a user who exceeded quota
 ccwb quota unblock john.doe@company.com --duration 24h
 ```
+
+> **Note**: All email addresses are normalised to lowercase before storing in DynamoDB. Mixed-case emails from the identity provider (e.g. `John.Doe@company.com`) are automatically lowercased when looking up and storing policies.
 
 ### Token Value Shortcuts
 
@@ -215,6 +253,7 @@ Sent when daily token usage exceeds 80%, 90%, or 100% of the daily limit. Daily 
 
 ### Sample Alert Content
 
+**Token quota alert:**
 ```
 Subject: Claude Code CRITICAL - Monthly Token Quota - 92%
 
@@ -237,7 +276,26 @@ Projected Monthly Total: 282,272,727 tokens
 This alert is sent once per threshold level per month.
 ```
 
-Alerts are deduplicated - each threshold triggers only once per user per period, with history stored in DynamoDB (60-day TTL).
+**Cost quota alert:**
+```
+Subject: Claude Code WARNING - Daily Cost Quota - 82%
+
+Claude Code Usage Alert - Daily Cost Quota
+
+User: john.doe@company.com
+Alert Level: WARNING
+Date: 2025-11-15
+Policy: user:john.doe@company.com
+
+Current Usage: $3.2800 / $4.00 (82.0%)
+
+Projected Daily Total: $4.79
+
+---
+This alert is sent once per threshold level per day.
+```
+
+Alerts are deduplicated — each threshold triggers only once per user per period, with history stored in DynamoDB (60-day TTL). Daily alerts (both token and cost) include the date in the deduplication key, so the same threshold can trigger once per day.
 
 ## User Notifications
 
@@ -254,9 +312,12 @@ The credential provider opens a browser page showing quota status when:
 | Blocked (100%+) | Yes (red) | No |
 
 The browser page displays:
-- **Status header**: Warning (⚠️) or Blocked (🚫)
-- **Monthly usage**: Progress bar with percentage
-- **Daily usage**: Progress bar with percentage (if daily limits configured)
+- **Status header**: Warning (⚠️) or Blocked (🚫) with colour-coded background
+- **Triggered by**: Which metric caused the alert or block (e.g. "Approaching daily cost")
+- **Monthly Token Usage**: Progress bar with token count and percentage
+- **Daily Token Usage**: Progress bar with token count and percentage
+- **Monthly Cost**: Progress bar with USD amount (shown when `monthly_cost_limit` is set)
+- **Daily Cost**: Progress bar with USD amount (shown when `daily_cost_limit` is set)
 - **Message**: Explanation and guidance
 
 ### Terminal Output
@@ -268,8 +329,12 @@ In addition to browser notifications, the terminal shows:
 ============================================================
 QUOTA WARNING
 ============================================================
-  Monthly: 180,000,000 / 225,000,000 tokens (80.0%)
-  Daily: 6,600,000 / 8,250,000 tokens (80.0%)
+  Triggered by: monthly cost limit
+
+  Monthly Token Usage:  180,000,000 / 225,000,000 tokens (80.0%)
+  Daily Token Usage:     6,600,000 /   8,250,000 tokens (80.0%)
+  Monthly Cost:              $24.1200 / $30.00 (80.4%)
+  Daily Cost:                 $3.2800 / $4.00 (82.0%)
 ============================================================
 ```
 
@@ -279,11 +344,14 @@ QUOTA WARNING
 ACCESS BLOCKED - QUOTA EXCEEDED
 ============================================================
 
-Monthly quota exceeded: 225,000,000 / 225,000,000 tokens (100.0%).
+Daily cost limit exceeded: $7.2100 / $4.00 (180.2%).
 Contact your administrator for assistance.
 
 Current Usage:
-  Monthly: 225,000,000 / 225,000,000 tokens (100.0%)
+  Monthly Token Usage:  185,000,000 / 225,000,000 tokens (82.2%)
+  Daily Token Usage:     8,100,000 /   8,250,000 tokens (98.2%)
+  Monthly Cost:              $24.8700 / $30.00 (82.9%)
+  Daily Cost:                 $7.2100 / $4.00 (180.2%)
 
 Policy: user:john.doe@company.com
 
@@ -437,17 +505,24 @@ For detailed monitoring setup, see the [Monitoring Guide](MONITORING.md).
 ### UserQuotaMetrics Table
 
 **User Totals**: `PK: USER#{email}`, `SK: MONTH#{YYYY-MM}`
-- Attributes: `total_tokens`, `daily_tokens`, `daily_date`, `input_tokens`, `output_tokens`, `cache_tokens`, `groups`, `last_updated`, `email`
+- Attributes: `total_tokens`, `daily_tokens`, `daily_date`, `total_cost`, `daily_cost`, `input_tokens`, `output_tokens`, `cache_tokens`, `groups`, `last_updated`, `email`
+- `total_cost`: accumulated USD cost for the current month (Decimal, 4dp)
+- `daily_cost`: accumulated USD cost for `daily_date` (reset to 0 when date changes)
+- `daily_date`: the date (YYYY-MM-DD UTC) that `daily_tokens` and `daily_cost` apply to
 - TTL: End of following month
 
 **Alert History**: `PK: ALERTS`, `SK: {YYYY-MM}#ALERT#{email}#{type}#{level}[#{date}]`
 - Attributes: `sent_at`, `alert_type`, `alert_level`, `usage_at_alert`, `policy_info`
+- `alert_type` values: `monthly`, `daily`, `monthly_cost`, `daily_cost`
+- Daily and daily_cost alert keys include `#{date}` so the same threshold can fire once per day
 - TTL: 60 days
 
 ### QuotaPolicies Table
 
 **Policy Records**: `PK: POLICY#{type}#{identifier}`, `SK: CURRENT`
-- Attributes: `policy_type`, `identifier`, `monthly_token_limit`, `daily_token_limit`, `warning_threshold_80`, `warning_threshold_90`, `enforcement_mode`, `enabled`, `created_at`, `updated_at`, `created_by`
+- Attributes: `policy_type`, `identifier`, `monthly_token_limit`, `daily_token_limit`, `monthly_cost_limit`, `daily_cost_limit`, `warning_threshold_80`, `warning_threshold_90`, `enforcement_mode`, `enabled`, `created_at`, `updated_at`, `created_by`
+- `monthly_cost_limit` / `daily_cost_limit`: optional USD cost limits (Decimal, stored as string for DynamoDB precision)
+- User policy identifiers are stored in lowercase (e.g. `POLICY#user#john.doe@company.com`)
 
 **GSI: PolicyTypeIndex**
 - PK: `policy_type` (user, group, default)
@@ -477,9 +552,12 @@ When `enforcement_mode` is set to `"block"` for a policy, the system will deny c
 
 1. **Quota Check API**: A real-time API endpoint checks user quota before credential issuance
 2. **Enforcement Point**: The credential provider calls the quota check API after OIDC authentication
-3. **Block Triggers**: Access is blocked when:
+3. **Block Triggers**: Access is blocked when any of the following are exceeded (cost is checked first):
+   - Monthly cost ≥ monthly_cost_limit (if configured)
+   - Daily cost ≥ daily_cost_limit (if configured)
    - Monthly token usage ≥ monthly_token_limit
    - Daily token usage ≥ daily_token_limit (if configured)
+4. **User notification**: The browser popup and terminal output both show which limit was exceeded and current usage vs limit for all configured metrics
 
 ### Configuring Blocking
 
@@ -646,14 +724,16 @@ Configure in your profile:
 ## Current Limitations
 
 - Quotas reset on calendar month/day (UTC timezone)
-- Requires email claim in JWT tokens
+- Requires email claim in JWT tokens for per-user attribution
 - Group membership requires JWT group claims from identity provider
 - Enforcement only at credential issuance (see [Enforcement Timing](#enforcement-timing) for mitigation)
+- Cost pricing is hardcoded in Lambda code — update `quota_monitor/index.py` if model prices change
+- Bedrock model invocation logging must be enabled in the AWS account (account-level setting)
 
 ## Future Enhancements
 
-- **Bulk import/export**: Manage policies via JSON files
-- **Quota reporting**: Generate usage reports across all users
+- **Self-service usage command**: `ccwb usage` for individual developers to check their own consumption without needing admin access
+- **IAM deny enforcement**: Server-side deny policy applied to the federated role when a user exceeds quota, as a belt-and-suspenders complement to credential-time blocking
 
 ## Integration Points
 

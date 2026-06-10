@@ -10,7 +10,8 @@ This guidance provides enterprise deployment patterns for Claude Code and Claude
 - **AWS SSO / IAM Identity Center**: Native AWS identity path for teams already using IAM Identity Center — no external IdP required
 - **Centralized Access Control**: Manage Claude Code access through your identity provider
 - **No API Key Management**: Eliminate the need to distribute or rotate long-lived credentials
-- **Usage Monitoring**: Optional CloudWatch dashboards for tracking usage and costs
+- **Usage Monitoring**: CloudWatch dashboards for tracking usage and costs — server-side data from Bedrock invocation logs captures all clients automatically
+- **Cost-Based Quotas**: Optional per-user monthly and daily spend limits in USD, enforced at credential issuance alongside token limits
 - **Multi-Region Support**: Configure which AWS regions users can access Bedrock in
 - **Multi-Partition Support**: Deploy to AWS Commercial or AWS GovCloud (US) regions
 - **Multi-Platform Support**: Windows, macOS (ARM & Intel), and Linux distributions
@@ -397,10 +398,12 @@ During `ccwb init`, choose between two monitoring modes:
 
 | Mode | Description | Infrastructure | Analytics | Cost |
 |------|-------------|----------------|-----------|------|
-| **Central collector** (ECS Fargate) | Server-side collector shared by all users | VPC, ECS Fargate, ALB | Supported | ~$30-50/mo |
-| **Sidecar collector** (local) | Runs on each developer's machine | None | Not in v1 | $0 server cost |
+| **Central collector** (ECS Fargate) | Server-side OpenTelemetry collector shared by all users | VPC, ECS Fargate, ALB | Supported | ~$30-50/mo |
+| **Sidecar collector** (local) | Lightweight OTEL binary runs on each developer's machine | None | Not available | $0 server cost |
 
 Both modes use OTLP to send metrics to CloudWatch and share the same PromQL dashboard.
+
+**Quota monitoring** uses a separate, always-on data source: **Bedrock model invocation logs**. The quota monitor Lambda queries the `bedrock-model-invocation` CloudWatch log group every 15 minutes regardless of which monitoring mode is selected. This server-side source captures all Bedrock clients (CLI, VS Code, desktop) automatically and provides the data needed for per-user token and cost quota enforcement.
 
 The central collector stack (deployed with `ccwb deploy monitoring`) includes:
 
@@ -411,6 +414,7 @@ The central collector stack (deployed with `ccwb deploy monitoring`) includes:
 
 See [Monitoring Guide](assets/docs/MONITORING.md) for setup details and dashboard examples.
 See [Analytics Guide](assets/docs/ANALYTICS.md) for SQL queries on historical data.
+See [Quota Monitoring Guide](assets/docs/QUOTA_MONITORING.md) for per-user token and cost quota enforcement.
 
 ## Additional Resources
 
@@ -431,6 +435,7 @@ See [Analytics Guide](assets/docs/ANALYTICS.md) for SQL queries on historical da
 
 - [Monitoring Guide](assets/docs/MONITORING.md) - OpenTelemetry setup and dashboards
 - [Analytics Guide](assets/docs/ANALYTICS.md) - S3 data lake and Athena SQL queries
+- [Quota Monitoring Guide](assets/docs/QUOTA_MONITORING.md) - Per-user token and cost quota enforcement
 
 ### Claude Cowork (Desktop)
 

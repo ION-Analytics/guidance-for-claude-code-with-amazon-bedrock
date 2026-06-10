@@ -449,6 +449,8 @@ You can enable this later by re-running `ccwb init` and `ccwb deploy analytics`.
 
 Enforces per-user monthly and daily token limits. Sends SNS alerts at 80%, 90%, and 100% of limits. Can block credential issuance when limits are exceeded.
 
+Usage data is sourced from Bedrock model invocation logs (server-side) — this captures all clients automatically without client-side telemetry configuration. Requires the `bedrock-model-invocation` log group to be enabled in your AWS account.
+
 If **Yes**, the wizard asks:
 
 **Q: `Monthly token limit per user (in millions):`**
@@ -477,6 +479,8 @@ How often quota is re-checked when credentials are cached.
 - `0` = check every request (adds ~200ms latency, strictest enforcement)
 - `30` = every 30 minutes (default — good balance)
 - `60` = hourly (minimal impact, 1-hour enforcement gap)
+
+> **Cost limits**: Per-user USD cost limits (`--monthly-cost-limit`, `--daily-cost-limit`) are configured per policy using `ccwb quota set-user` / `set-group` / `set-default` after deployment — they are not set during `ccwb init`. See [Quota Monitoring Guide](assets/docs/QUOTA_MONITORING.md) for details.
 
 ---
 
@@ -601,10 +605,12 @@ This deploys in order based on what you configured in Step 2:
 
 | Resource | What it does |
 |---|---|
-| DynamoDB table (`QuotaPolicies`) | Stores per-user/group/default token limits |
-| Lambda (quota-monitor) | Runs every 15 min — checks thresholds via PromQL, sends alerts |
+| DynamoDB table (`QuotaPolicies`) | Stores per-user/group/default token and cost limits |
+| DynamoDB table (`UserQuotaMetrics`) | Tracks per-user monthly/daily token and cost totals |
+| Lambda (`quota-monitor`) | Runs every 15 min — queries Bedrock invocation logs, updates usage, sends SNS alerts |
+| Lambda (`quota-check`) | Real-time check at credential issuance — enforces token and cost limits |
 | SNS topic | Delivers quota alerts to subscribed email/webhook |
-| API Gateway (quota check) | Real-time quota check at credential issuance time |
+| API Gateway | Secured endpoint for real-time quota checks from the credential provider |
 
 **CodeBuild stack** (if Windows builds = Yes):
 
