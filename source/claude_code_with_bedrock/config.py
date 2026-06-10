@@ -71,6 +71,7 @@ class Profile:
     monthly_cost_limit: float | None = None  # Monthly cost limit in USD (None = use token limit)
     daily_cost_limit: float | None = None  # Daily cost limit in USD (None = use token limit)
     enable_finegrained_quotas: bool = False  # Enable fine-grained quota policies (user/group/default)
+    enable_bypass_detection: bool = False  # Alert when user has Bedrock usage but no CollectorHeartbeat
     quota_policies_table: str | None = None  # DynamoDB table name for quota policies
     user_quota_metrics_table: str | None = None  # DynamoDB table name for user quota metrics
     quota_api_endpoint: str | None = None  # API Gateway endpoint for real-time quota checks

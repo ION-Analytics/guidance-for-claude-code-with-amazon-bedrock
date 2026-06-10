@@ -18,6 +18,7 @@ QUOTA_TABLE = os.environ.get("QUOTA_TABLE", "UserQuotaMetrics")
 POLICIES_TABLE = os.environ.get("POLICIES_TABLE")
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
 ENABLE_FINEGRAINED_QUOTAS = os.environ.get("ENABLE_FINEGRAINED_QUOTAS", "false").lower() == "true"
+ENABLE_BYPASS_DETECTION = os.environ.get("ENABLE_BYPASS_DETECTION", "false").lower() == "true"
 METRICS_REGION = os.environ.get("METRICS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
 # Default limits
@@ -250,6 +251,91 @@ def publish_cost_metrics(usage_data):
     print(f"Published cost metrics for {len(usage_data)} users to CloudWatch/Usage")
 
 
+def check_collector_bypass(active_users, sent_alerts, current_date):
+    """Alert when a user has Bedrock usage but no CollectorHeartbeat in the last 15 minutes.
+
+    Only checks users who have sent at least one heartbeat historically (via ListMetrics) —
+    this skips users on central collector mode who never run the sidecar daemon.
+    One alert per user per day, stored with alert_type='bypass'.
+    """
+    if not ENABLE_BYPASS_DETECTION or not active_users:
+        return []
+
+    cw = boto3.client("cloudwatch", region_name=METRICS_REGION)
+
+    # Get the set of emails that have EVER sent a CollectorHeartbeat.
+    # These are the users expected to have the daemon running.
+    known_heartbeat_users = set()
+    try:
+        paginator = cw.get_paginator("list_metrics")
+        for page in paginator.paginate(
+            Namespace="ClaudeCode/Security",
+            MetricName="CollectorHeartbeat",
+        ):
+            for m in page.get("Metrics", []):
+                for d in m.get("Dimensions", []):
+                    if d["Name"] == "UserEmail":
+                        known_heartbeat_users.add(d["Value"].lower())
+    except Exception as e:
+        print(f"Bypass detection: error listing heartbeat metrics: {e}")
+        return []
+
+    if not known_heartbeat_users:
+        return []
+
+    # For each active user that is expected to have a daemon, check for a
+    # recent heartbeat covering the last AGGREGATION_WINDOW seconds.
+    now = datetime.now(timezone.utc)
+    window_start = now.timestamp() - AGGREGATION_WINDOW
+
+    alerts = []
+    for email in active_users:
+        if email not in known_heartbeat_users:
+            continue
+        alert_key = f"{email}#bypass#{current_date}#exceeded"
+        if alert_key in sent_alerts:
+            continue
+
+        # Query for any heartbeat datapoint in the last 15 minutes.
+        try:
+            resp = cw.get_metric_data(
+                MetricDataQueries=[{
+                    "Id": "hb",
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": "ClaudeCode/Security",
+                            "MetricName": "CollectorHeartbeat",
+                            "Dimensions": [{"Name": "UserEmail", "Value": email}],
+                        },
+                        "Period": AGGREGATION_WINDOW,
+                        "Stat": "Sum",
+                    },
+                    "ReturnData": True,
+                }],
+                StartTime=datetime.fromtimestamp(window_start, tz=timezone.utc),
+                EndTime=now,
+            )
+            values = resp.get("MetricDataResults", [{}])[0].get("Values", [])
+            heartbeat_present = any(v > 0 for v in values)
+        except Exception as e:
+            print(f"Bypass detection: error querying heartbeat for {email}: {e}")
+            continue
+
+        if not heartbeat_present:
+            print(f"Bypass detection: no CollectorHeartbeat for {email} in last {AGGREGATION_WINDOW}s (Bedrock usage present)")
+            alerts.append({
+                "user": email,
+                "alert_type": "bypass",
+                "alert_level": "exceeded",
+                "date": current_date,
+                "policy_info": "security",
+                "enforcement_mode": "alert",
+            })
+            record_sent_alert("bypass", email, "bypass", "exceeded", {"date": current_date})
+
+    return alerts
+
+
 def lambda_handler(event, context):
     """Fetch usage from PromQL, update DynamoDB, check quotas, send alerts."""
     print(f"Starting quota monitoring at {datetime.now(timezone.utc).isoformat()}")
@@ -366,6 +452,16 @@ def lambda_handler(event, context):
         if alerts_to_send:
             send_alerts(alerts_to_send)
             print(f"Sent {len(alerts_to_send)} alerts")
+
+        # Step 5: Bypass detection — alert if active users have no CollectorHeartbeat
+        bypass_alerts = check_collector_bypass(
+            active_users=set(delta_data.keys()),
+            sent_alerts=sent_alerts,
+            current_date=current_date,
+        )
+        if bypass_alerts:
+            send_alerts(bypass_alerts)
+            print(f"Sent {len(bypass_alerts)} bypass alerts")
 
         # Publish per-user cost metrics to CloudWatch for dashboard visibility
         publish_cost_metrics(usage_data)
@@ -548,7 +644,7 @@ def get_sent_alerts(month_name):
             parts = item["sk"].split("#")
             if len(parts) >= 5:
                 email, atype, alevel = parts[2], parts[3], parts[4]
-                if atype == "daily" and len(parts) >= 6:
+                if atype in ("daily", "daily_cost", "bypass") and len(parts) >= 6:
                     sent.add(f"{email}#{atype}#{parts[5]}#{alevel}")
                 else:
                     sent.add(f"{email}#{atype}#{alevel}")
@@ -561,7 +657,7 @@ def get_sent_alerts(month_name):
                 parts = item["sk"].split("#")
                 if len(parts) >= 5:
                     email, atype, alevel = parts[2], parts[3], parts[4]
-                    if atype in ("daily", "daily_cost") and len(parts) >= 6:
+                    if atype in ("daily", "daily_cost", "bypass") and len(parts) >= 6:
                         sent.add(f"{email}#{atype}#{parts[5]}#{alevel}")
                     else:
                         sent.add(f"{email}#{atype}#{alevel}")
@@ -574,7 +670,7 @@ def record_sent_alert(month_name, email, alert_type, alert_level, alert_data):
     """Record sent alert to prevent duplicates."""
     try:
         month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
-        if alert_type in ("daily", "daily_cost"):
+        if alert_type in ("daily", "daily_cost", "bypass"):
             date = alert_data.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
             sk = f"{month_prefix}#ALERT#{email}#{alert_type}#{alert_level}#{date}"
         else:
@@ -606,30 +702,44 @@ def send_alerts(alerts):
                 "daily": "Daily Token Quota",
                 "monthly_cost": "Monthly Cost Quota",
                 "daily_cost": "Daily Cost Quota",
+                "bypass": "Collector Bypass Detected",
             }.get(alert_type, "Quota")
 
-            subject = f"Claude Code {level_prefix} - {type_label} - {alert['percentage']:.0f}%"
-
-            if is_cost:
-                usage_str = f"${alert['current_usage']:.4f} / ${alert['limit']:.2f} ({alert['percentage']:.1f}%)"
+            if alert_type == "bypass":
+                subject = f"Claude Code SECURITY - Collector Bypass - {alert['user']}"
+                lines = [
+                    f"User:    {alert['user']}",
+                    f"Alert:   OTel collector (daemon) not running — Bedrock usage detected without a CollectorHeartbeat",
+                    f"Date:    {alert.get('date', '')}",
+                    "",
+                    "The user has active Bedrock usage this period but their credential daemon is not",
+                    "sending a heartbeat. This may indicate the otelcol sidecar has been stopped.",
+                    "Token and cost quotas are unaffected (enforced via server-side Bedrock logs).",
+                    "OTEL dashboard visibility for this user is degraded.",
+                ]
             else:
-                usage_str = f"{int(alert['current_usage']):,} / {int(alert['limit']):,} tokens ({alert['percentage']:.1f}%)"
+                subject = f"Claude Code {level_prefix} - {type_label} - {alert['percentage']:.0f}%"
 
-            lines = [
-                f"User:        {alert['user']}",
-                f"Alert:       {type_label} - {alert['alert_level'].upper()}",
-                f"Usage:       {usage_str}",
-                f"Policy:      {alert.get('policy_info', 'default')}",
-                f"Enforcement: {alert.get('enforcement_mode', 'alert')}",
-            ]
+                if is_cost:
+                    usage_str = f"${alert['current_usage']:.4f} / ${alert['limit']:.2f} ({alert['percentage']:.1f}%)"
+                else:
+                    usage_str = f"{int(alert['current_usage']):,} / {int(alert['limit']):,} tokens ({alert['percentage']:.1f}%)"
 
-            if alert_type == "monthly_cost" and alert.get("projected_total") is not None:
-                lines.append(f"Projected:   ${alert['projected_total']:.2f} this month ({alert.get('days_remaining', '?')} days remaining)")
-            elif alert_type == "monthly" and alert.get("projected_total") is not None:
-                lines.append(f"Projected:   {int(alert['projected_total']):,} tokens ({alert.get('days_remaining', '?')} days remaining)")
+                lines = [
+                    f"User:        {alert['user']}",
+                    f"Alert:       {type_label} - {alert['alert_level'].upper()}",
+                    f"Usage:       {usage_str}",
+                    f"Policy:      {alert.get('policy_info', 'default')}",
+                    f"Enforcement: {alert.get('enforcement_mode', 'alert')}",
+                ]
 
-            if alert.get("date"):
-                lines.append(f"Date:        {alert['date']} (daily limit resets at UTC midnight)")
+                if alert_type == "monthly_cost" and alert.get("projected_total") is not None:
+                    lines.append(f"Projected:   ${alert['projected_total']:.2f} this month ({alert.get('days_remaining', '?')} days remaining)")
+                elif alert_type == "monthly" and alert.get("projected_total") is not None:
+                    lines.append(f"Projected:   {int(alert['projected_total']):,} tokens ({alert.get('days_remaining', '?')} days remaining)")
+
+                if alert.get("date"):
+                    lines.append(f"Date:        {alert['date']} (daily limit resets at UTC midnight)")
 
             message = "\n".join(lines)
             sns_client.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=message)

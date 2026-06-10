@@ -761,9 +761,14 @@ def ensure_collector_running():
         except (ProcessLookupError, ValueError, OSError):
             pass  # stale PID file
 
-    # Launch collector with the -collector profile
+    # Launch collector with the -collector profile.
+    # Strip any injected static credential env vars so otelcol uses credential_process
+    # from the -collector profile rather than the static creds Claude Code injects.
     profile = os.environ.get("AWS_PROFILE", "ClaudeCode")
-    collector_env = {**os.environ, "AWS_PROFILE": f"{profile}-collector"}
+    _strip = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+              "AWS_SESSION_EXPIRATION", "AWS_CREDENTIAL_EXPIRATION"}
+    collector_env = {k: v for k, v in os.environ.items() if k not in _strip}
+    collector_env["AWS_PROFILE"] = f"{profile}-collector"
 
     cache_dir = Path.home() / ".claude-code-session"
     cache_dir.mkdir(parents=True, exist_ok=True)

@@ -798,6 +798,7 @@ class DeployCommand(Command):
                     f"OidcIssuerUrl={oidc_issuer_url}",
                     f"OidcClientId={oidc_client_id}",
                     f"EnableFinegrainedQuotas={str(enable_finegrained_quotas).lower()}",
+                    f"EnableBypassDetection={str(getattr(profile, 'enable_bypass_detection', False)).lower()}",
                     f"MonthlyCostLimit={monthly_cost_limit or ''}",
                     f"DailyCostLimit={daily_cost_limit or ''}",
                 ]
@@ -1049,6 +1050,7 @@ class DeployCommand(Command):
                 f"OidcIssuerUrl={profile.provider_domain}",
                 f"OidcClientId={profile.client_id}",
                 f"EnableFinegrainedQuotas={str(profile.enable_finegrained_quotas).lower()}",
+                f"EnableBypassDetection={str(getattr(profile, 'enable_bypass_detection', False)).lower()}",
             ]
             print_deploy_cmd("/tmp/quota-monitoring-packaged.yaml", stack_name, params)
 

@@ -60,6 +60,14 @@ Parameters:
       - 'false'
     Description: Enable fine-grained quota policies (user/group/default levels)
 
+  EnableBypassDetection:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Alert when a user has Bedrock usage but no CollectorHeartbeat in the same window (indicates otelcol sidecar not running)
+
   # JWT Authentication Parameters for Quota Check API
   OidcIssuerUrl:
     Type: String
@@ -217,6 +225,7 @@ Resources:
           DAILY_ENFORCEMENT_MODE: !Ref DailyEnforcementMode
           MONTHLY_ENFORCEMENT_MODE: !Ref MonthlyEnforcementMode
           ENABLE_FINEGRAINED_QUOTAS: !Ref EnableFinegrainedQuotas
+          ENABLE_BYPASS_DETECTION: !Ref EnableBypassDetection
           METRICS_REGION: !Ref 'AWS::Region'
           INVOCATION_LOG_GROUP: bedrock-model-invocation
           MONTHLY_COST_LIMIT: !Ref MonthlyCostLimit
