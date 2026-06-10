@@ -1087,6 +1087,41 @@ class InitCommand(Command):
                     config["quota"]["daily_enforcement_mode"] = daily_enforcement
                     config["quota"]["monthly_enforcement_mode"] = monthly_enforcement
 
+                    # Cost limits (optional)
+                    console.print("\n[bold]Cost Limits (Optional)[/bold]")
+                    console.print("Set spending caps in USD alongside token limits.")
+                    console.print("Leave blank to enforce token limits only.")
+
+                    existing_monthly_cost = config.get("quota", {}).get("monthly_cost_limit")
+                    monthly_cost_default = str(existing_monthly_cost) if existing_monthly_cost else ""
+                    monthly_cost_str = questionary.text(
+                        "Monthly cost limit per user in USD (e.g. 150.00, or Enter to skip):",
+                        default=monthly_cost_default,
+                        validate=lambda x: x == "" or (
+                            all(c in "0123456789." for c in x) and x.count(".") <= 1 and float(x) > 0
+                            if x else True
+                        ),
+                    ).ask()
+                    monthly_cost_limit = float(monthly_cost_str) if monthly_cost_str else None
+                    config["quota"]["monthly_cost_limit"] = monthly_cost_limit
+
+                    existing_daily_cost = config.get("quota", {}).get("daily_cost_limit")
+                    daily_cost_default = str(existing_daily_cost) if existing_daily_cost else ""
+                    daily_cost_str = questionary.text(
+                        "Daily cost limit per user in USD (e.g. 30.00, or Enter to skip):",
+                        default=daily_cost_default,
+                        validate=lambda x: x == "" or (
+                            all(c in "0123456789." for c in x) and x.count(".") <= 1 and float(x) > 0
+                            if x else True
+                        ),
+                    ).ask()
+                    daily_cost_limit = float(daily_cost_str) if daily_cost_str else None
+                    config["quota"]["daily_cost_limit"] = daily_cost_limit
+
+                    if monthly_cost_limit or daily_cost_limit:
+                        console.print("  [dim]Cost limits apply to all users without a fine-grained policy.[/dim]")
+                        console.print("  [dim]Per-user overrides: ccwb quota set-user <email> --monthly-cost-limit <usd>[/dim]")
+
                     # Quota re-check interval
                     console.print("\n[bold]Quota Re-Check Interval[/bold]")
                     console.print("How often to re-check quota with cached credentials:")
@@ -1104,6 +1139,10 @@ class InitCommand(Command):
                     console.print("\n[green]✓[/green] Quota monitoring configured:")
                     console.print(f"  • Monthly: {monthly_limit:,} tokens ({monthly_enforcement})")
                     console.print(f"  • Daily:   {daily_limit:,} tokens ({daily_enforcement})")
+                    if monthly_cost_limit:
+                        console.print(f"  • Monthly cost: ${monthly_cost_limit:.2f}")
+                    if daily_cost_limit:
+                        console.print(f"  • Daily cost:   ${daily_cost_limit:.2f}")
                     console.print(f"  • Burst buffer: {burst_percent}%")
                     console.print(f"  • Re-check interval: {check_interval} minutes")
 
@@ -1720,9 +1759,15 @@ class InitCommand(Command):
                 monthly_mode = quota_config.get("monthly_enforcement_mode", "block")
                 daily_mode = quota_config.get("daily_enforcement_mode", "alert")
                 check_interval = quota_config.get("check_interval", 30)
+                monthly_cost = quota_config.get("monthly_cost_limit")
+                daily_cost = quota_config.get("daily_cost_limit")
                 quota_status = f"✓ Monthly: {monthly:,} ({monthly_mode})"
+                if monthly_cost:
+                    quota_status += f" / ${monthly_cost:.2f}"
                 if daily:
                     quota_status += f"\n  Daily: {daily:,} ({daily_mode})"
+                    if daily_cost:
+                        quota_status += f" / ${daily_cost:.2f}"
                 quota_status += f"\n  Re-check: {check_interval} min"
                 table.add_row("Quota Monitoring", quota_status)
             else:
@@ -2014,6 +2059,8 @@ class InitCommand(Command):
             burst_buffer_percent=config_data.get("quota", {}).get("burst_buffer_percent", 10),
             daily_enforcement_mode=config_data.get("quota", {}).get("daily_enforcement_mode", "alert"),
             monthly_enforcement_mode=config_data.get("quota", {}).get("monthly_enforcement_mode", "block"),
+            monthly_cost_limit=config_data.get("quota", {}).get("monthly_cost_limit"),
+            daily_cost_limit=config_data.get("quota", {}).get("daily_cost_limit"),
             quota_check_interval=config_data.get("quota", {}).get("check_interval", 30),
             cowork_3p_enabled=config_data.get("cowork_3p", {}).get("enabled", True),
             tags=config_data.get("tags", {}),
@@ -2371,6 +2418,8 @@ class InitCommand(Command):
                     "monthly_limit": getattr(profile, "monthly_token_limit", 300000000),
                     "warning_threshold_80": getattr(profile, "warning_threshold_80", 240000000),
                     "warning_threshold_90": getattr(profile, "warning_threshold_90", 270000000),
+                    "monthly_cost_limit": getattr(profile, "monthly_cost_limit", None),
+                    "daily_cost_limit": getattr(profile, "daily_cost_limit", None),
                 }
 
             # Add analytics configuration if present
