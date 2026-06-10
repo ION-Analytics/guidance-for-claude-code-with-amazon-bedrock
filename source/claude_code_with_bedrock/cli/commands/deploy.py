@@ -762,6 +762,8 @@ class DeployCommand(Command):
                 monthly_enforcement = getattr(profile, "monthly_enforcement_mode", "block")
                 warning_80 = getattr(profile, "warning_threshold_80", int(monthly_limit * 0.8))
                 warning_90 = getattr(profile, "warning_threshold_90", int(monthly_limit * 0.9))
+                monthly_cost_limit = getattr(profile, "monthly_cost_limit", None)
+                daily_cost_limit = getattr(profile, "daily_cost_limit", None)
 
                 # Get OIDC configuration for JWT authentication
                 if profile.provider_type == "cognito":
@@ -796,6 +798,8 @@ class DeployCommand(Command):
                     f"OidcIssuerUrl={oidc_issuer_url}",
                     f"OidcClientId={oidc_client_id}",
                     f"EnableFinegrainedQuotas={str(enable_finegrained_quotas).lower()}",
+                    f"MonthlyCostLimit={monthly_cost_limit or ''}",
+                    f"DailyCostLimit={daily_cost_limit or ''}",
                 ]
 
                 # Package the template using AWS CLI

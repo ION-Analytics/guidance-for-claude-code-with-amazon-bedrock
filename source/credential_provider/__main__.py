@@ -1652,12 +1652,26 @@ class MultiProviderAuth:
 
         print(f"\n{message}\n", file=sys.stderr)
 
+        reason = quota_result.get("reason", "")
+        reason_labels = {
+            "monthly_cost_exceeded": "monthly cost limit",
+            "daily_cost_exceeded": "daily cost limit",
+            "monthly_exceeded": "monthly token limit",
+            "daily_exceeded": "daily token limit",
+        }
+        if reason in reason_labels:
+            print(f"  Triggered by: {reason_labels[reason]}", file=sys.stderr)
+
         if usage:
             print("Current Usage:", file=sys.stderr)
             if "monthly_tokens" in usage and "monthly_limit" in usage:
-                print(f"  Monthly: {usage['monthly_tokens']:,} / {usage['monthly_limit']:,} tokens ({usage.get('monthly_percent', 0):.1f}%)", file=sys.stderr)
+                print(f"  Monthly tokens: {usage['monthly_tokens']:,} / {usage['monthly_limit']:,} ({usage.get('monthly_percent', 0):.1f}%)", file=sys.stderr)
             if "daily_tokens" in usage and "daily_limit" in usage:
-                print(f"  Daily: {usage['daily_tokens']:,} / {usage['daily_limit']:,} tokens ({usage.get('daily_percent', 0):.1f}%)", file=sys.stderr)
+                print(f"  Daily tokens:   {usage['daily_tokens']:,} / {usage['daily_limit']:,} ({usage.get('daily_percent', 0):.1f}%)", file=sys.stderr)
+            if usage.get("monthly_cost_limit") is not None:
+                print(f"  Monthly cost:   ${usage.get('total_cost', 0):.4f} / ${usage['monthly_cost_limit']:.2f} ({usage.get('monthly_cost_percent', 0):.1f}%)", file=sys.stderr)
+            if usage.get("daily_cost_limit") is not None:
+                print(f"  Daily cost:     ${usage.get('daily_cost', 0):.4f} / ${usage['daily_cost_limit']:.2f} ({usage.get('daily_cost_percent', 0):.1f}%)", file=sys.stderr)
 
         if policy:
             print(f"\nPolicy: {policy.get('type', 'unknown')}:{policy.get('identifier', 'unknown')}", file=sys.stderr)
@@ -1688,12 +1702,18 @@ class MultiProviderAuth:
             # Calculate percentages
             monthly_percent = usage.get("monthly_percent", 0)
             daily_percent = usage.get("daily_percent", 0)
+            monthly_cost_percent = usage.get("monthly_cost_percent", 0)
+            daily_cost_percent = usage.get("daily_cost_percent", 0)
 
             # Format numbers for display
             monthly_tokens = usage.get("monthly_tokens", 0)
             monthly_limit = usage.get("monthly_limit", 0)
             daily_tokens = usage.get("daily_tokens", 0)
             daily_limit = usage.get("daily_limit", 0)
+            total_cost = usage.get("total_cost", 0.0)
+            monthly_cost_limit = usage.get("monthly_cost_limit")
+            daily_cost = usage.get("daily_cost", 0.0)
+            daily_cost_limit = usage.get("daily_cost_limit")
 
             def format_tokens(n):
                 if n >= 1_000_000_000:
@@ -1728,6 +1748,43 @@ class MultiProviderAuth:
 
             monthly_bar_color = bar_color(monthly_percent)
             daily_bar_color = bar_color(daily_percent) if daily_limit else "#6c757d"
+            monthly_cost_bar_color = bar_color(monthly_cost_percent) if monthly_cost_limit else "#6c757d"
+            daily_cost_bar_color = bar_color(daily_cost_percent) if daily_cost_limit else "#6c757d"
+
+            # Determine which metric triggered the alert/block
+            reason = quota_result.get("reason", "")
+            reason_labels = {
+                "monthly_cost_exceeded": "monthly cost limit",
+                "daily_cost_exceeded": "daily cost limit",
+                "monthly_exceeded": "monthly token limit",
+                "daily_exceeded": "daily token limit",
+            }
+            if reason in reason_labels:
+                trigger_label = reason_labels[reason]
+            elif monthly_cost_percent >= 100:
+                trigger_label = "monthly cost limit"
+            elif daily_cost_percent >= 100:
+                trigger_label = "daily cost limit"
+            elif monthly_percent >= 100:
+                trigger_label = "monthly token limit"
+            elif daily_percent >= 100:
+                trigger_label = "daily token limit"
+            elif monthly_cost_percent >= 80:
+                trigger_label = "monthly cost"
+            elif daily_cost_percent >= 80:
+                trigger_label = "daily cost"
+            elif monthly_percent >= 80:
+                trigger_label = "monthly token usage"
+            elif daily_percent >= 80:
+                trigger_label = "daily token usage"
+            else:
+                trigger_label = None
+
+            if trigger_label:
+                trigger_verb = "exceeded" if is_blocked else "approaching"
+                trigger_html = f'<div class="trigger">{"🚫" if is_blocked else "⚠️"} {trigger_verb.capitalize()} {trigger_label}</div>'
+            else:
+                trigger_html = ""
 
             html = f"""<!DOCTYPE html>
 <html>
@@ -1797,6 +1854,15 @@ class MultiProviderAuth:
             color: white;
             box-sizing: border-box;
         }}
+        .trigger {{
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: {header_bg};
+            color: {status_color};
+        }}
         .message {{
             background: #f8f9fa;
             padding: 15px;
@@ -1823,7 +1889,7 @@ class MultiProviderAuth:
         <div class="content">
             <div class="usage-section">
                 <div class="usage-label">
-                    <span>Monthly Usage</span>
+                    <span>Monthly Token Usage</span>
                     <span class="usage-value">{format_tokens(monthly_tokens)} / {format_tokens(monthly_limit)} ({monthly_percent:.1f}%)</span>
                 </div>
                 <div class="progress-bar">
@@ -1835,7 +1901,7 @@ class MultiProviderAuth:
             {"" if not daily_limit else f'''
             <div class="usage-section">
                 <div class="usage-label">
-                    <span>Daily Usage</span>
+                    <span>Daily Token Usage</span>
                     <span class="usage-value">{format_tokens(daily_tokens)} / {format_tokens(daily_limit)} ({daily_percent:.1f}%)</span>
                 </div>
                 <div class="progress-bar">
@@ -1845,6 +1911,33 @@ class MultiProviderAuth:
                 </div>
             </div>
             '''}
+            {"" if not monthly_cost_limit else f'''
+            <div class="usage-section">
+                <div class="usage-label">
+                    <span>Monthly Cost</span>
+                    <span class="usage-value">${total_cost:.2f} / ${monthly_cost_limit:.2f} ({monthly_cost_percent:.1f}%)</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {min(monthly_cost_percent, 100)}%; background: {monthly_cost_bar_color};">
+                        {monthly_cost_percent:.0f}%
+                    </div>
+                </div>
+            </div>
+            '''}
+            {"" if not daily_cost_limit else f'''
+            <div class="usage-section">
+                <div class="usage-label">
+                    <span>Daily Cost</span>
+                    <span class="usage-value">${daily_cost:.2f} / ${daily_cost_limit:.2f} ({daily_cost_percent:.1f}%)</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {min(daily_cost_percent, 100)}%; background: {daily_cost_bar_color};">
+                        {daily_cost_percent:.0f}%
+                    </div>
+                </div>
+            </div>
+            '''}
+            {trigger_html}
             <div class="message">
                 {html_module.escape(message) if message else ("Your access has been blocked due to quota limits." if is_blocked else "You're approaching your quota limit.")}
                 {" Contact your administrator for assistance." if is_blocked else ""}
@@ -1903,8 +1996,11 @@ class MultiProviderAuth:
         monthly_percent = usage.get("monthly_percent", 0)
         daily_percent = usage.get("daily_percent", 0)
 
+        monthly_cost_percent = usage.get("monthly_cost_percent", 0)
+        daily_cost_percent = usage.get("daily_cost_percent", 0)
+
         # Only show warning for significant thresholds (80%+)
-        if monthly_percent < 80 and daily_percent < 80:
+        if monthly_percent < 80 and daily_percent < 80 and monthly_cost_percent < 80 and daily_cost_percent < 80:
             return
 
         # Show terminal warning
@@ -1912,11 +2008,26 @@ class MultiProviderAuth:
         print("QUOTA WARNING", file=sys.stderr)
         print("=" * 60, file=sys.stderr)
 
+        # Identify which metric triggered the warning
+        if monthly_cost_percent >= 80:
+            trigger = "monthly cost"
+        elif daily_cost_percent >= 80:
+            trigger = "daily cost"
+        elif monthly_percent >= 80:
+            trigger = "monthly token usage"
+        else:
+            trigger = "daily token usage"
+        print(f"  Triggered by: {trigger}", file=sys.stderr)
+
         if usage:
             if "monthly_tokens" in usage and "monthly_limit" in usage:
-                print(f"  Monthly: {usage['monthly_tokens']:,} / {usage['monthly_limit']:,} tokens ({monthly_percent:.1f}%)", file=sys.stderr)
+                print(f"  Monthly tokens: {usage['monthly_tokens']:,} / {usage['monthly_limit']:,} ({monthly_percent:.1f}%)", file=sys.stderr)
             if "daily_tokens" in usage and "daily_limit" in usage:
-                print(f"  Daily: {usage['daily_tokens']:,} / {usage['daily_limit']:,} tokens ({daily_percent:.1f}%)", file=sys.stderr)
+                print(f"  Daily tokens:   {usage['daily_tokens']:,} / {usage['daily_limit']:,} ({daily_percent:.1f}%)", file=sys.stderr)
+            if usage.get("monthly_cost_limit") is not None:
+                print(f"  Monthly cost:   ${usage.get('total_cost', 0):.4f} / ${usage['monthly_cost_limit']:.2f} ({monthly_cost_percent:.1f}%)", file=sys.stderr)
+            if usage.get("daily_cost_limit") is not None:
+                print(f"  Daily cost:     ${usage.get('daily_cost', 0):.4f} / ${usage['daily_cost_limit']:.2f} ({daily_cost_percent:.1f}%)", file=sys.stderr)
 
         print("=" * 60 + "\n", file=sys.stderr)
 

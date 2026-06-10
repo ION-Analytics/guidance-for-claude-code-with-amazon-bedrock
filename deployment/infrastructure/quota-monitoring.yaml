@@ -26,6 +26,16 @@ Parameters:
     MinValue: 0
     MaxValue: 100000000
 
+  MonthlyCostLimit:
+    Type: String
+    Default: ''
+    Description: Default monthly cost limit per user in USD (e.g. 50.00) - leave empty to use token limits only
+
+  DailyCostLimit:
+    Type: String
+    Default: ''
+    Description: Default daily cost limit per user in USD (e.g. 5.00) - leave empty to use token limits only
+
   DailyEnforcementMode:
     Type: String
     Default: 'alert'
@@ -155,6 +165,7 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:PutItem
                   - dynamodb:GetItem
+                  - dynamodb:UpdateItem
                   - dynamodb:Scan
                 Resource:
                   - !GetAtt UserQuotaMetrics.Arn
@@ -176,6 +187,12 @@ Resources:
                   - cloudwatch:ListMetrics
                   - cloudwatch:PutMetricData
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - logs:StopQuery
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:bedrock-model-invocation:*'
 
   # Lambda function for quota monitoring
   QuotaMonitorFunction:
@@ -201,6 +218,9 @@ Resources:
           MONTHLY_ENFORCEMENT_MODE: !Ref MonthlyEnforcementMode
           ENABLE_FINEGRAINED_QUOTAS: !Ref EnableFinegrainedQuotas
           METRICS_REGION: !Ref 'AWS::Region'
+          INVOCATION_LOG_GROUP: bedrock-model-invocation
+          MONTHLY_COST_LIMIT: !Ref MonthlyCostLimit
+          DAILY_COST_LIMIT: !Ref DailyCostLimit
       Code: ./lambda-functions/quota_monitor/
 
   # EventBridge Rule to run quota monitor every 15 minutes
@@ -274,6 +294,9 @@ Resources:
           DAILY_TOKEN_LIMIT: !Ref DailyTokenLimit
           DAILY_ENFORCEMENT_MODE: !Ref DailyEnforcementMode
           MONTHLY_ENFORCEMENT_MODE: !Ref MonthlyEnforcementMode
+          MONTHLY_COST_LIMIT: !Ref MonthlyCostLimit
+          DAILY_COST_LIMIT: !Ref DailyCostLimit
+          ENABLE_FINEGRAINED_QUOTAS: !Ref EnableFinegrainedQuotas
       Code: ./lambda-functions/quota_check/
 
   # HTTP API Gateway (v2 - cheaper and faster than REST API)

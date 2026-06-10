@@ -117,16 +117,13 @@ Resources:
               }
             },
             {
-              "type": "chart",
+              "type": "log",
               "x": 12, "y": 14, "width": 12, "height": 6,
               "properties": {
-                "title": "Top Users by Token Usage",
-                "view": "line",
+                "title": "Top Users by Token Usage (Today)",
+                "view": "bar",
                 "region": "${MetricsRegion}",
-                "data": { "queries": [
-                  { "id": "a", "type": "cloudwatch-metrics", "language": "PromQL", "query": "topk(500, sum by (\"user.email\")({\"claude_code.token.usage\", \"@resource.service.name\"=\"claude-code\"}))", "step": 60 }
-                ] },
-                "plotOptions": { "legend": { "position": "bottom", "show": true }, "xAxis": { "type": "datetime" }, "yAxis": [{ "type": "linear" }], "style": { "lineOptions": { "filled": false, "stacked": false, "width": 2, "pattern": "solid", "spline": false }, "numberOptions": { "sparkline": true }, "pieOptions": { "innerSize": "50%" }, "barOptions": {}, "gaugeOptions": {} } }
+                "query": "SOURCE 'bedrock-model-invocation' | fields identity.arn, input.inputTokenCount, input.cacheReadInputTokenCount, input.cacheWriteInputTokenCount, output.outputTokenCount | filter ispresent(identity.arn) | parse identity.arn '*/*/*' as arn_prefix, role_name, user_email | stats sum(input.inputTokenCount) + sum(input.cacheReadInputTokenCount) + sum(input.cacheWriteInputTokenCount) + sum(output.outputTokenCount) as total_tokens by user_email | sort total_tokens desc | limit 20"
               }
             },
             {

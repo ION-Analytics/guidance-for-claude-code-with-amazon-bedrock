@@ -1,16 +1,13 @@
 # ABOUTME: Lambda function that monitors user token quotas and sends SNS alerts
-# ABOUTME: Queries CloudWatch PromQL API for usage data, writes to DynamoDB, checks thresholds
+# ABOUTME: Queries Bedrock model invocation logs for usage data, writes to DynamoDB, checks thresholds
 
 import json
 import boto3
 import os
-import urllib.request
-import urllib.parse
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key, Attr
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
 
 # Initialize clients
 dynamodb = boto3.resource("dynamodb")
@@ -30,102 +27,122 @@ WARNING_THRESHOLD_90 = int(os.environ.get("WARNING_THRESHOLD_90", "270000000"))
 
 # Bedrock EU cross-region inference pricing (USD per million tokens)
 # Source: https://aws.amazon.com/bedrock/pricing/ — Europe (Ireland), Global Cross-region Inference
-# Defaults to Claude Sonnet 4.6 pricing (most commonly used model).
-# Override via env vars if fleet shifts to a different model mix.
-#
-# Model reference:
-#   Sonnet 4.6/4.5/4.0: input $3.00, output $15.00, cache_read $0.30, cache_write_5m $3.75
-#   Haiku 4.5:          input $1.00, output  $5.00, cache_read $0.10, cache_write_5m $1.25
-#   Opus 4.8/4.7/4.6:   input $5.00, output $25.00, cache_read $0.50, cache_write_5m $6.25
-PRICE_INPUT_PER_M = float(os.environ.get("PRICE_INPUT_PER_M", "3.00"))
-PRICE_OUTPUT_PER_M = float(os.environ.get("PRICE_OUTPUT_PER_M", "15.00"))
-PRICE_CACHE_READ_PER_M = float(os.environ.get("PRICE_CACHE_READ_PER_M", "0.30"))
-PRICE_CACHE_WRITE_PER_M = float(os.environ.get("PRICE_CACHE_WRITE_PER_M", "3.75"))
+# Format: (input, output, cache_read, cache_write_5m)
+MODEL_PRICING = {
+    "opus":   ( 5.00, 25.00, 0.50,  6.25),
+    "sonnet": ( 3.00, 15.00, 0.30,  3.75),
+    "haiku":  ( 1.00,  5.00, 0.10,  1.25),
+}
+
+
+def _get_pricing(model_id):
+    m = (model_id or "").lower()
+    if "opus" in m:
+        return MODEL_PRICING["opus"]
+    if "haiku" in m:
+        return MODEL_PRICING["haiku"]
+    return MODEL_PRICING["sonnet"]
 
 # DynamoDB tables
 quota_table = dynamodb.Table(QUOTA_TABLE)
 policies_table = dynamodb.Table(POLICIES_TABLE) if POLICIES_TABLE else None
 
-# PromQL endpoint
-PROMQL_ENDPOINT = f"https://monitoring.{METRICS_REGION}.amazonaws.com/api/v1/query"
-
-
-def _promql_query(query, time_param=None):
-    """Execute a PromQL instant query against CloudWatch Prometheus-compatible API with SigV4."""
-    data = urllib.parse.urlencode({"query": query})
-    if time_param:
-        data += f"&time={time_param}"
-    url = PROMQL_ENDPOINT
-
-    request = AWSRequest(
-        method="POST", url=url,
-        data=data.encode("utf-8"),
-        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-    )
-    credentials = boto3.Session().get_credentials().get_frozen_credentials()
-    SigV4Auth(credentials, "monitoring", METRICS_REGION).add_auth(request)
-
-    req = urllib.request.Request(url, data=data.encode("utf-8"), headers=dict(request.headers), method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()[:500]
-        print(f"[DEBUG] HTTP {e.code}: {body}")
-        raise
-
-    if result.get("status") != "success":
-        raise RuntimeError(f"PromQL query failed: {result}")
-    return result["data"].get("result", [])
-
-
+INVOCATION_LOG_GROUP = os.environ.get("INVOCATION_LOG_GROUP", "bedrock-model-invocation")
 AGGREGATION_WINDOW = 900  # 15 minutes in seconds (matches EventBridge schedule)
 
 
-def fetch_usage_from_promql():
-    """Query PromQL for per-user token usage in the last aggregation window only."""
-    window = AGGREGATION_WINDOW
+def fetch_usage_from_invocation_logs():
+    """Query CloudWatch Logs Insights against Bedrock model invocation logs for the last 15 minutes.
 
-    # Delta tokens per user in the last window
-    results = _promql_query(
-        f'sum by ("user.email")(increase({{"claude_code.token.usage"}}[{window}s]))'
+    Captures all clients (CLI, VS Code, desktop app, Cowork) regardless of credential path,
+    as long as the IAM session name is the user email (true for both BedrockAzureFederatedRole
+    and SSO sessions at ION Analytics).
+    """
+    logs = boto3.client("logs")
+    now = datetime.now(timezone.utc)
+    end_time = int(now.timestamp())
+    start_time = end_time - AGGREGATION_WINDOW
+
+    query = """
+fields identity.arn, modelId,
+       input.inputTokenCount,
+       input.cacheReadInputTokenCount,
+       input.cacheWriteInputTokenCount,
+       output.outputTokenCount
+| filter ispresent(identity.arn)
+| stats
+    sum(input.inputTokenCount) as input_tokens,
+    sum(input.cacheReadInputTokenCount) as cache_read_tokens,
+    sum(input.cacheWriteInputTokenCount) as cache_write_tokens,
+    sum(output.outputTokenCount) as output_tokens
+  by identity.arn, modelId
+"""
+
+    response = logs.start_query(
+        logGroupName=INVOCATION_LOG_GROUP,
+        startTime=start_time,
+        endTime=end_time,
+        queryString=query,
     )
+    query_id = response["queryId"]
 
-    # Delta token type breakdown per user
-    type_results = _promql_query(
-        f'sum by ("user.email", type)(increase({{"claude_code.token.usage"}}[{window}s]))'
-    )
+    # Poll until complete (typically 2-5 seconds)
+    for _ in range(30):
+        result = logs.get_query_results(queryId=query_id)
+        if result["status"] in ("Complete", "Failed", "Cancelled"):
+            break
+        time.sleep(1)
 
+    if result["status"] != "Complete":
+        raise RuntimeError(f"CloudWatch Logs Insights query {result['status']}")
+
+    # Aggregate per user across models, applying correct pricing per model
     users = {}
-    for r in results:
-        email = r["metric"].get("user.email", "")
-        val = float(r["value"][1])
-        if email and val > 0:
-            users[email] = {"total_tokens": val}
+    for row in result.get("results", []):
+        fields = {f["field"]: f["value"] for f in row}
+        arn = fields.get("identity.arn", "")
+        if not arn:
+            continue
+        email = arn.split("/")[-1].lower()
+        if "@" not in email:
+            continue
+        model_id = fields.get("modelId", "")
+        inp        = float(fields.get("input_tokens", 0))
+        cache_read = float(fields.get("cache_read_tokens", 0))
+        cache_write = float(fields.get("cache_write_tokens", 0))
+        out        = float(fields.get("output_tokens", 0))
+        total      = inp + cache_read + cache_write + out
+        if total <= 0:
+            continue
+        pi, po, pr, pw = _get_pricing(model_id)
+        cost_delta = (
+            inp        * pi / 1_000_000 +
+            out        * po / 1_000_000 +
+            cache_read * pr / 1_000_000 +
+            cache_write * pw / 1_000_000
+        )
+        u = users.setdefault(email, {
+            "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
+            "cache_tokens": 0, "cache_write_tokens": 0, "cost": 0.0,
+        })
+        u["total_tokens"]      += total
+        u["input_tokens"]      += inp
+        u["output_tokens"]     += out
+        u["cache_tokens"]      += cache_read
+        u["cache_write_tokens"] += cache_write
+        u["cost"]              += cost_delta
 
-    for r in type_results:
-        email = r["metric"].get("user.email", "")
-        token_type = r["metric"].get("type", "")
-        val = float(r["value"][1])
-        if email and val > 0:
-            u = users.setdefault(email, {})
-            if token_type == "input":
-                u["input_tokens"] = val
-            elif token_type == "output":
-                u["output_tokens"] = val
-            elif token_type in ("cache_read", "cacheRead"):
-                u["cache_tokens"] = val
-
-    print(f"Fetched delta usage for {len(users)} users from PromQL ({window}s window)")
+    print(f"Fetched delta usage for {len(users)} users from Bedrock invocation logs ({AGGREGATION_WINDOW}s window)")
     return users
 
 
-def calculate_cost(input_tokens, output_tokens, cache_tokens):
+def calculate_cost(input_tokens, output_tokens, cache_tokens, cache_write_tokens=0):
     """Calculate USD cost from token counts using configured per-million prices."""
     return (
         (input_tokens * PRICE_INPUT_PER_M / 1_000_000) +
         (output_tokens * PRICE_OUTPUT_PER_M / 1_000_000) +
-        (cache_tokens * PRICE_CACHE_READ_PER_M / 1_000_000)
+        (cache_tokens * PRICE_CACHE_READ_PER_M / 1_000_000) +
+        (cache_write_tokens * PRICE_CACHE_WRITE_PER_M / 1_000_000)
     )
 
 
@@ -144,7 +161,8 @@ def update_quota_metrics(usage_data):
             inp = int(usage.get("input_tokens", 0))
             out = int(usage.get("output_tokens", 0))
             cache = int(usage.get("cache_tokens", 0))
-            cost_delta = calculate_cost(inp, out, cache)
+            cache_write = int(usage.get("cache_write_tokens", 0))
+            cost_delta = usage.get("cost") or calculate_cost(inp, out, cache, cache_write)
 
             # Check if daily_date changed (new day = reset daily counter)
             response = quota_table.get_item(Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"})
@@ -198,7 +216,7 @@ def publish_cost_metrics(usage_data):
         daily_cost = usage.get("daily_cost", 0)
         if total_cost <= 0 and daily_cost <= 0:
             continue
-        dimensions = [{"Name": "UserEmail", "Value": email}]
+        dimensions = [{"Name": "UserEmail", "Value": email.lower()}]
         if total_cost > 0:
             metric_data.append({
                 "MetricName": "UserMonthlyCost",
@@ -239,8 +257,8 @@ def lambda_handler(event, context):
     days_remaining = days_in_month - now.day
 
     try:
-        # Step 1: Fetch delta usage from PromQL and increment DynamoDB
-        delta_data = fetch_usage_from_promql()
+        # Step 1: Fetch delta usage from Bedrock invocation logs and increment DynamoDB
+        delta_data = fetch_usage_from_invocation_logs()
         if delta_data:
             update_quota_metrics(delta_data)
 
@@ -300,21 +318,36 @@ def lambda_handler(event, context):
 
             total_tokens = usage.get("total_tokens", 0)
             daily_tokens = usage.get("daily_tokens", 0)
+            total_cost = usage.get("total_cost", 0.0)
+            daily_cost = usage.get("daily_cost", 0.0)
 
             alerts = check_limits_and_generate_alerts(
                 email=email, total_tokens=total_tokens, daily_tokens=daily_tokens,
+                total_cost=total_cost, daily_cost=daily_cost,
                 policy=policy, month_name=month_name, current_date=current_date,
                 days_remaining=days_remaining, days_in_month=days_in_month, sent_alerts=sent_alerts,
             )
 
-            monthly_pct = (total_tokens / policy["monthly_token_limit"]) * 100 if policy["monthly_token_limit"] > 0 else 0
-            if monthly_pct > 100:
-                stats["exceeded"] += 1
-            elif monthly_pct > 90:
-                stats["over_90"] += 1
-            elif monthly_pct > 80:
-                stats["over_80"] += 1
-            if policy.get("daily_token_limit") and daily_tokens > policy["daily_token_limit"]:
+            monthly_cost_limit = policy.get("monthly_cost_limit") or 0
+            if monthly_cost_limit > 0:
+                cost_pct = (total_cost / monthly_cost_limit) * 100
+                if cost_pct > 100:
+                    stats["exceeded"] += 1
+                elif cost_pct > 90:
+                    stats["over_90"] += 1
+                elif cost_pct > 80:
+                    stats["over_80"] += 1
+            elif policy["monthly_token_limit"] > 0:
+                monthly_pct = (total_tokens / policy["monthly_token_limit"]) * 100
+                if monthly_pct > 100:
+                    stats["exceeded"] += 1
+                elif monthly_pct > 90:
+                    stats["over_90"] += 1
+                elif monthly_pct > 80:
+                    stats["over_80"] += 1
+            if policy.get("daily_cost_limit") and daily_cost > policy["daily_cost_limit"]:
+                stats["daily_exceeded"] += 1
+            elif policy.get("daily_token_limit") and daily_tokens > policy["daily_token_limit"]:
                 stats["daily_exceeded"] += 1
 
             for alert in alerts:
@@ -381,9 +414,13 @@ def load_all_policies():
 def resolve_user_quota(email, groups, policies_cache):
     """Resolve effective quota policy: user > group > default > env defaults."""
     if not ENABLE_FINEGRAINED_QUOTAS:
+        monthly_cost_limit = os.environ.get("MONTHLY_COST_LIMIT")
+        daily_cost_limit = os.environ.get("DAILY_COST_LIMIT")
         return {
             "policy_type": "default", "identifier": "environment",
             "monthly_token_limit": MONTHLY_TOKEN_LIMIT, "daily_token_limit": None,
+            "monthly_cost_limit": float(monthly_cost_limit) if monthly_cost_limit else None,
+            "daily_cost_limit": float(daily_cost_limit) if daily_cost_limit else None,
             "warning_threshold_80": WARNING_THRESHOLD_80, "warning_threshold_90": WARNING_THRESHOLD_90,
             "enforcement_mode": "alert", "enabled": True,
         }
@@ -400,52 +437,95 @@ def resolve_user_quota(email, groups, policies_cache):
     return None
 
 
-def check_limits_and_generate_alerts(email, total_tokens, daily_tokens, policy,
-                                     month_name, current_date, days_remaining, days_in_month, sent_alerts):
-    """Check limits and generate alert dicts."""
+def check_limits_and_generate_alerts(email, total_tokens, daily_tokens, total_cost, daily_cost,
+                                     policy, month_name, current_date, days_remaining, days_in_month, sent_alerts):
+    """Check limits and generate alert dicts. Cost limits take precedence over token limits."""
     alerts = []
     policy_info = f"{policy['policy_type']}:{policy['identifier']}"
     enforcement_mode = policy.get("enforcement_mode", "alert")
-    monthly_limit = policy["monthly_token_limit"]
-    monthly_pct = (total_tokens / monthly_limit) * 100 if monthly_limit > 0 else 0
-    daily_average = total_tokens / max(1, int(current_date.split("-")[2]))
-    projected_total = daily_average * days_in_month
+    monthly_cost_limit = policy.get("monthly_cost_limit") or 0
+    daily_cost_limit = policy.get("daily_cost_limit") or 0
 
-    level = None
-    if total_tokens > monthly_limit:
-        level = "exceeded"
-    elif total_tokens > policy["warning_threshold_90"]:
-        level = "critical"
-    elif total_tokens > policy["warning_threshold_80"]:
-        level = "warning"
-
-    if level and f"{email}#monthly#{level}" not in sent_alerts:
-        alerts.append({
-            "user": email, "alert_type": "monthly", "alert_level": level,
-            "current_usage": int(total_tokens), "limit": monthly_limit,
-            "percentage": round(monthly_pct, 1), "month": month_name,
-            "days_remaining": days_remaining, "daily_average": int(daily_average),
-            "projected_total": int(projected_total), "policy_info": policy_info,
-            "enforcement_mode": enforcement_mode,
-        })
-
-    daily_limit = policy.get("daily_token_limit")
-    if daily_limit:
-        daily_pct = (daily_tokens / daily_limit) * 100 if daily_limit > 0 else 0
-        dlevel = None
-        if daily_tokens > daily_limit:
-            dlevel = "exceeded"
-        elif daily_tokens > (daily_limit * 0.9):
-            dlevel = "critical"
-        elif daily_tokens > (daily_limit * 0.8):
-            dlevel = "warning"
-        if dlevel and f"{email}#daily#{current_date}#{dlevel}" not in sent_alerts:
+    # Monthly — prefer cost limit if configured, fall back to token limit
+    if monthly_cost_limit > 0:
+        pct = (total_cost / monthly_cost_limit) * 100
+        level = None
+        if total_cost >= monthly_cost_limit:
+            level = "exceeded"
+        elif pct >= 90:
+            level = "critical"
+        elif pct >= 80:
+            level = "warning"
+        if level and f"{email}#monthly_cost#{level}" not in sent_alerts:
+            day_of_month = int(current_date.split("-")[2])
+            daily_avg_cost = total_cost / max(1, day_of_month)
+            projected_cost = daily_avg_cost * days_in_month
             alerts.append({
-                "user": email, "alert_type": "daily", "alert_level": dlevel,
-                "current_usage": int(daily_tokens), "limit": daily_limit,
-                "percentage": round(daily_pct, 1), "date": current_date,
+                "user": email, "alert_type": "monthly_cost", "alert_level": level,
+                "current_usage": round(total_cost, 4), "limit": monthly_cost_limit,
+                "percentage": round(pct, 1), "month": month_name,
+                "days_remaining": days_remaining, "projected_total": round(projected_cost, 4),
                 "policy_info": policy_info, "enforcement_mode": enforcement_mode,
             })
+    else:
+        monthly_limit = policy.get("monthly_token_limit", 0)
+        if monthly_limit > 0:
+            monthly_pct = (total_tokens / monthly_limit) * 100
+            day_of_month = int(current_date.split("-")[2])
+            daily_average = total_tokens / max(1, day_of_month)
+            projected_total = daily_average * days_in_month
+            level = None
+            if total_tokens >= monthly_limit:
+                level = "exceeded"
+            elif total_tokens > policy.get("warning_threshold_90", monthly_limit * 0.9):
+                level = "critical"
+            elif total_tokens > policy.get("warning_threshold_80", monthly_limit * 0.8):
+                level = "warning"
+            if level and f"{email}#monthly#{level}" not in sent_alerts:
+                alerts.append({
+                    "user": email, "alert_type": "monthly", "alert_level": level,
+                    "current_usage": int(total_tokens), "limit": monthly_limit,
+                    "percentage": round(monthly_pct, 1), "month": month_name,
+                    "days_remaining": days_remaining, "daily_average": int(daily_average),
+                    "projected_total": int(projected_total), "policy_info": policy_info,
+                    "enforcement_mode": enforcement_mode,
+                })
+
+    # Daily — prefer cost limit if configured, fall back to token limit
+    if daily_cost_limit > 0:
+        dpct = (daily_cost / daily_cost_limit) * 100
+        dlevel = None
+        if daily_cost >= daily_cost_limit:
+            dlevel = "exceeded"
+        elif dpct >= 90:
+            dlevel = "critical"
+        elif dpct >= 80:
+            dlevel = "warning"
+        if dlevel and f"{email}#daily_cost#{current_date}#{dlevel}" not in sent_alerts:
+            alerts.append({
+                "user": email, "alert_type": "daily_cost", "alert_level": dlevel,
+                "current_usage": round(daily_cost, 4), "limit": daily_cost_limit,
+                "percentage": round(dpct, 1), "date": current_date,
+                "policy_info": policy_info, "enforcement_mode": enforcement_mode,
+            })
+    else:
+        daily_limit = policy.get("daily_token_limit")
+        if daily_limit and daily_limit > 0:
+            daily_pct = (daily_tokens / daily_limit) * 100
+            dlevel = None
+            if daily_tokens >= daily_limit:
+                dlevel = "exceeded"
+            elif daily_tokens > (daily_limit * 0.9):
+                dlevel = "critical"
+            elif daily_tokens > (daily_limit * 0.8):
+                dlevel = "warning"
+            if dlevel and f"{email}#daily#{current_date}#{dlevel}" not in sent_alerts:
+                alerts.append({
+                    "user": email, "alert_type": "daily", "alert_level": dlevel,
+                    "current_usage": int(daily_tokens), "limit": daily_limit,
+                    "percentage": round(daily_pct, 1), "date": current_date,
+                    "policy_info": policy_info, "enforcement_mode": enforcement_mode,
+                })
     return alerts
 
 

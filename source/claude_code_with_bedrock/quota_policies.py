@@ -4,6 +4,7 @@
 """Quota policy CRUD operations for fine-grained quota management."""
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -105,7 +106,8 @@ class QuotaPolicyManager:
         Returns:
             Formatted partition key.
         """
-        return f"POLICY#{policy_type.value}#{identifier}"
+        normalised = identifier.lower() if policy_type == PolicyType.USER else identifier
+        return f"POLICY#{policy_type.value}#{normalised}"
 
     def create_policy(
         self,
@@ -113,6 +115,8 @@ class QuotaPolicyManager:
         identifier: str,
         monthly_token_limit: int,
         daily_token_limit: int | None = None,
+        monthly_cost_limit: float | None = None,
+        daily_cost_limit: float | None = None,
         warning_threshold_80: int | None = None,
         warning_threshold_90: int | None = None,
         enforcement_mode: EnforcementMode = EnforcementMode.ALERT,
@@ -139,9 +143,11 @@ class QuotaPolicyManager:
             PolicyAlreadyExistsError: If policy already exists.
             QuotaPolicyError: For other DynamoDB errors.
         """
-        # Validate identifier for default policy
-        if policy_type == PolicyType.DEFAULT and identifier != "default":
+        # Normalise identifier
+        if policy_type == PolicyType.DEFAULT:
             identifier = "default"
+        elif policy_type == PolicyType.USER:
+            identifier = identifier.lower()
 
         # Auto-calculate warning thresholds if not provided
         if warning_threshold_80 is None:
@@ -155,6 +161,8 @@ class QuotaPolicyManager:
             identifier=identifier,
             monthly_token_limit=monthly_token_limit,
             daily_token_limit=daily_token_limit,
+            monthly_cost_limit=monthly_cost_limit,
+            daily_cost_limit=daily_cost_limit,
             warning_threshold_80=warning_threshold_80,
             warning_threshold_90=warning_threshold_90,
             enforcement_mode=enforcement_mode,
@@ -213,6 +221,8 @@ class QuotaPolicyManager:
         identifier: str,
         monthly_token_limit: int | None = None,
         daily_token_limit: int | None = None,
+        monthly_cost_limit: float | None = None,
+        daily_cost_limit: float | None = None,
         warning_threshold_80: int | None = None,
         warning_threshold_90: int | None = None,
         enforcement_mode: EnforcementMode | None = None,
@@ -237,6 +247,9 @@ class QuotaPolicyManager:
             PolicyNotFoundError: If policy doesn't exist.
             QuotaPolicyError: For other DynamoDB errors.
         """
+        if policy_type == PolicyType.USER:
+            identifier = identifier.lower()
+
         # First get the existing policy
         existing = self.get_policy(policy_type, identifier)
         if not existing:
@@ -266,6 +279,14 @@ class QuotaPolicyManager:
         if daily_token_limit is not None:
             update_parts.append("daily_token_limit = :daily_limit")
             expression_values[":daily_limit"] = daily_token_limit
+
+        if monthly_cost_limit is not None:
+            update_parts.append("monthly_cost_limit = :monthly_cost_limit")
+            expression_values[":monthly_cost_limit"] = Decimal(str(round(monthly_cost_limit, 4)))
+
+        if daily_cost_limit is not None:
+            update_parts.append("daily_cost_limit = :daily_cost_limit")
+            expression_values[":daily_cost_limit"] = Decimal(str(round(daily_cost_limit, 4)))
 
         if warning_threshold_80 is not None:
             update_parts.append("warning_threshold_80 = :warn_80")
@@ -317,6 +338,9 @@ class QuotaPolicyManager:
         Raises:
             QuotaPolicyError: For DynamoDB errors.
         """
+        if policy_type == PolicyType.USER:
+            identifier = identifier.lower()
+
         pk = self._make_pk(policy_type, identifier)
 
         try:
@@ -383,6 +407,8 @@ class QuotaPolicyManager:
         Returns:
             Effective QuotaPolicy or None if no policy applies (unlimited).
         """
+        email = email.lower()
+
         # 1. Check for user-specific policy
         user_policy = self.get_policy(PolicyType.USER, email)
         if user_policy and user_policy.enabled:
@@ -414,6 +440,8 @@ class QuotaPolicyManager:
         groups: list[str] | None = None,
         current_monthly_tokens: int = 0,
         current_daily_tokens: int = 0,
+        current_monthly_cost: float = 0.0,
+        current_daily_cost: float = 0.0,
     ) -> dict[str, Any]:
         """Get usage summary with policy context for a user.
 
@@ -426,6 +454,7 @@ class QuotaPolicyManager:
         Returns:
             Dictionary with policy and usage information.
         """
+        email = email.lower()
         policy = self.resolve_quota_for_user(email, groups)
 
         if policy is None:
@@ -437,6 +466,8 @@ class QuotaPolicyManager:
                 "unlimited": True,
                 "monthly_tokens": current_monthly_tokens,
                 "daily_tokens": current_daily_tokens,
+                "monthly_cost": current_monthly_cost,
+                "daily_cost": current_daily_cost,
             }
 
         monthly_pct = (
@@ -453,6 +484,14 @@ class QuotaPolicyManager:
                 else 0
             )
 
+        monthly_cost_pct = None
+        if policy.monthly_cost_limit:
+            monthly_cost_pct = (current_monthly_cost / policy.monthly_cost_limit * 100)
+
+        daily_cost_pct = None
+        if policy.daily_cost_limit:
+            daily_cost_pct = (current_daily_cost / policy.daily_cost_limit * 100)
+
         return {
             "email": email,
             "policy_applied": True,
@@ -466,6 +505,12 @@ class QuotaPolicyManager:
             "daily_tokens": current_daily_tokens,
             "daily_token_limit": policy.daily_token_limit,
             "daily_token_pct": round(daily_pct, 1) if daily_pct is not None else None,
+            "monthly_cost": current_monthly_cost,
+            "monthly_cost_limit": policy.monthly_cost_limit,
+            "monthly_cost_pct": round(monthly_cost_pct, 1) if monthly_cost_pct is not None else None,
+            "daily_cost": current_daily_cost,
+            "daily_cost_limit": policy.daily_cost_limit,
+            "daily_cost_pct": round(daily_cost_pct, 1) if daily_cost_pct is not None else None,
             "warning_threshold_80": policy.warning_threshold_80,
             "warning_threshold_90": policy.warning_threshold_90,
         }

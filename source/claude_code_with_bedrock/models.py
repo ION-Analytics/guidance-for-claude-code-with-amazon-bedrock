@@ -969,6 +969,8 @@ class QuotaPolicy:
 
     # Optional limits
     daily_token_limit: int | None = None
+    monthly_cost_limit: float | None = None  # USD — takes precedence over token limit if set
+    daily_cost_limit: float | None = None    # USD — takes precedence over token limit if set
 
     # Thresholds (auto-calculated from monthly_token_limit if not provided)
     warning_threshold_80: int | None = None
@@ -1006,6 +1008,12 @@ class QuotaPolicy:
         if self.daily_token_limit is not None:
             item["daily_token_limit"] = self.daily_token_limit
 
+        if self.monthly_cost_limit is not None:
+            item["monthly_cost_limit"] = Decimal(str(round(self.monthly_cost_limit, 4)))
+
+        if self.daily_cost_limit is not None:
+            item["daily_cost_limit"] = Decimal(str(round(self.daily_cost_limit, 4)))
+
         if self.created_at:
             item["created_at"] = self.created_at.isoformat()
 
@@ -1025,6 +1033,8 @@ class QuotaPolicy:
             identifier=item["identifier"],
             monthly_token_limit=int(item["monthly_token_limit"]),
             daily_token_limit=int(item["daily_token_limit"]) if item.get("daily_token_limit") else None,
+            monthly_cost_limit=float(item["monthly_cost_limit"]) if item.get("monthly_cost_limit") else None,
+            daily_cost_limit=float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
             warning_threshold_80=int(item.get("warning_threshold_80", 0)),
             warning_threshold_90=int(item.get("warning_threshold_90", 0)),
             enforcement_mode=EnforcementMode(item.get("enforcement_mode", "alert")),

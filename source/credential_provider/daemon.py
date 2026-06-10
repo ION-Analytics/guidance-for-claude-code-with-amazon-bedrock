@@ -71,13 +71,22 @@ def _read_email() -> str | None:
 
 
 def _otelcol_running() -> bool:
-    if not COLLECTOR_PID_FILE.exists():
-        return False
+    # Check PID file first
+    if COLLECTOR_PID_FILE.exists():
+        try:
+            pid = int(COLLECTOR_PID_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    # Fallback: check if port 8888 is in use (catches stale processes with no PID file)
+    import socket
     try:
-        pid = int(COLLECTOR_PID_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (ValueError, ProcessLookupError, PermissionError):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex(("127.0.0.1", 8888)) == 0
+    except OSError:
         return False
 
 

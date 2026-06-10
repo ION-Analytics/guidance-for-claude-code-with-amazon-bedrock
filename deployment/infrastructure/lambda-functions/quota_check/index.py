@@ -60,7 +60,8 @@ def lambda_handler(event, context):
         jwt_claims = authorizer_context.get("jwt", {}).get("claims", {})
 
         # Email from validated JWT claims (secure - no parameter tampering possible)
-        email = jwt_claims.get("email")
+        # Normalise to lowercase to match stored policy/usage keys
+        email = (jwt_claims.get("email") or "").lower() or None
 
         # Extract groups from various possible JWT claims
         groups = extract_groups_from_claims(jwt_claims)
@@ -159,8 +160,7 @@ def lambda_handler(event, context):
 
         # Check daily cost limit
         if daily_cost_limit and daily_cost_limit > 0 and daily_cost >= daily_cost_limit:
-            daily_mode = policy.get("daily_enforcement_mode", "alert")
-            if daily_mode == "block":
+            if enforcement_mode == "block":
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_cost_exceeded",
@@ -191,8 +191,7 @@ def lambda_handler(event, context):
 
         # Check daily token limit (if configured)
         if daily_limit and daily_limit > 0 and daily_tokens >= daily_limit:
-            daily_mode = policy.get("daily_enforcement_mode", "alert")
-            if daily_mode == "block":
+            if enforcement_mode == "block":
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_exceeded",

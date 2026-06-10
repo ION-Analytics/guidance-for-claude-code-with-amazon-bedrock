@@ -68,6 +68,8 @@ class Profile:
     burst_buffer_percent: int = 10  # Burst buffer for daily limit (5-25%, default 10%)
     daily_enforcement_mode: str = "alert"  # Daily limit enforcement: "alert" or "block"
     monthly_enforcement_mode: str = "block"  # Monthly limit enforcement: "alert" or "block"
+    monthly_cost_limit: float | None = None  # Monthly cost limit in USD (None = use token limit)
+    daily_cost_limit: float | None = None  # Daily cost limit in USD (None = use token limit)
     enable_finegrained_quotas: bool = False  # Enable fine-grained quota policies (user/group/default)
     quota_policies_table: str | None = None  # DynamoDB table name for quota policies
     user_quota_metrics_table: str | None = None  # DynamoDB table name for user quota metrics
