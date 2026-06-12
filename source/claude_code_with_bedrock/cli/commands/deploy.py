@@ -597,12 +597,15 @@ class DeployCommand(Command):
 
                 else:  # presigned-s3 or legacy
                     template = project_root / "deployment" / "infrastructure" / "presigned-s3-distribution.yaml"
-                    params = [f"IdentityPoolName={profile.identity_pool_name}"]
+                    params = [
+                        f"IdentityPoolName={profile.identity_pool_name}",
+                        f"AwsOrgId={getattr(profile, 'aws_org_id', '') or ''}",
+                    ]
                     return deploy_with_cf(
                         template,
                         stack_name,
                         params,
-                        ["CAPABILITY_NAMED_IAM"],
+                        [],
                         task_description="Deploying presigned S3 distribution stack...",
                     )
 

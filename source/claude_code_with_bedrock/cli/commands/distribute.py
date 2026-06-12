@@ -966,22 +966,25 @@ class DistributeCommand(Command):
                 progress.start()
                 task = progress.add_task("Processing...", total=None)
 
-            # Generate presigned URL
-            progress.update(task, description="Generating presigned URL...")
-            allowed_ips = self.option("allowed-ips")
-
-            if allowed_ips:
-                # Generate URL with IP restrictions
-                url = self._generate_restricted_url(s3, bucket_name, package_key, allowed_ips, expires_hours)
+            # Org-wide access: use direct S3 URI (no presigned URL needed)
+            org_id = getattr(profile, "aws_org_id", None)
+            if org_id:
+                url = f"s3://{bucket_name}/{package_key}"
             else:
-                # Generate standard presigned URL
-                try:
-                    url = s3.generate_presigned_url(
-                        "get_object", Params={"Bucket": bucket_name, "Key": package_key}, ExpiresIn=expires_hours * 3600
-                    )
-                except ClientError as e:
-                    console.print(f"[red]Failed to generate URL: {e}[/red]")
-                    return 1
+                # Generate presigned URL
+                progress.update(task, description="Generating presigned URL...")
+                allowed_ips = self.option("allowed-ips")
+
+                if allowed_ips:
+                    url = self._generate_restricted_url(s3, bucket_name, package_key, allowed_ips, expires_hours)
+                else:
+                    try:
+                        url = s3.generate_presigned_url(
+                            "get_object", Params={"Bucket": bucket_name, "Key": package_key}, ExpiresIn=expires_hours * 3600
+                        )
+                    except ClientError as e:
+                        console.print(f"[red]Failed to generate URL: {e}[/red]")
+                        return 1
 
             # Store in Parameter Store
             progress.update(task, description="Storing in Parameter Store...")
@@ -1040,43 +1043,57 @@ class DistributeCommand(Command):
             console.print(f"\n[bold]Package saved locally:[/bold] dist/{filename}")
 
         if profile.enable_distribution:
-            # Show distribution-specific details
-            if allowed_ips:
-                console.print(f"[dim]Restricted to IPs: {allowed_ips}[/dim]")
-
-            console.print(f"\n[cyan]{url}[/cyan]")
+            org_id = getattr(profile, "aws_org_id", None)
 
             console.print("\n[bold]Package Details:[/bold]")
             console.print(f"  Filename: {filename}")
             console.print(f"  SHA256: {checksum}")
-            console.print(f"  Expires: {expiration.strftime('%Y-%m-%d %H:%M:%S')}")
+            if not org_id:
+                console.print(f"  Expires: {expiration.strftime('%Y-%m-%d %H:%M:%S')}")
             console.print(f"  Size: {self._format_size(file_size)}")
 
-            # Show QR code if requested
-            if self.option("show-qr"):
-                self._display_qr_code(url, console)
-
-            console.print("\n[bold]Share this URL with developers to download the package.[/bold]")
-
-            # Output download commands for different platforms
             console.print("\n[bold]Download and Installation Instructions:[/bold]")
 
-            console.print("\n[cyan]For macOS/Linux:[/cyan]")
-            console.print("1. Download (copy entire line):")
-            # Use regular print to avoid Rich console line wrapping
-            print(f'   curl -L -o "{filename}" "{url}"')
-            console.print("2. Extract and install:")
-            console.print(f"   unzip {filename} && cd claude-code-package && ./install.sh")
+            if org_id:
+                # Org-wide access — use aws s3 cp (no expiry, no presigned URL)
+                console.print(f"\n[dim]S3 URI:[/dim] [cyan]{url}[/cyan]")
+                console.print("\n[cyan]For macOS/Linux:[/cyan]")
+                console.print("1. Download:")
+                print(f'   aws s3 cp "{url}" "{filename}"')
+                console.print("2. Extract and install:")
+                console.print(f"   unzip {filename} && cd claude-code-package && ./install.sh")
 
-            console.print("\n[cyan]For Windows PowerShell:[/cyan]")
-            console.print("1. Download (copy entire line):")
-            print(f'   Invoke-WebRequest -Uri "{url}" -OutFile "{filename}"')
-            console.print("2. Extract and install:")
-            console.print(f'   Expand-Archive -Path "{filename}" -DestinationPath "."')
-            console.print("   cd claude-code-package")
-            console.print("   .\\install.bat")
+                console.print("\n[cyan]For Windows PowerShell:[/cyan]")
+                console.print("1. Download:")
+                print(f'   aws s3 cp "{url}" "{filename}"')
+                console.print("2. Extract and install:")
+                console.print(f'   Expand-Archive -Path "{filename}" -DestinationPath "."')
+                console.print("   cd claude-code-package")
+                console.print("   .\\install.bat")
 
-            console.print(f"\n[dim]Verify download with: sha256sum {filename} (or Get-FileHash on Windows)[/dim]")
+                console.print(f"\n[dim]Verify download with: sha256sum {filename} (or Get-FileHash on Windows)[/dim]")
+            else:
+                # Presigned URL mode
+                if allowed_ips:
+                    console.print(f"[dim]Restricted to IPs: {allowed_ips}[/dim]")
+                console.print(f"\n[cyan]{url}[/cyan]")
+                console.print("\n[bold]Share this URL with developers to download the package.[/bold]")
+
+                console.print("\n[cyan]For macOS/Linux:[/cyan]")
+                console.print("1. Download (copy entire line):")
+                print(f'   curl -L -o "{filename}" "{url}"')
+                console.print("2. Extract and install:")
+                console.print(f"   unzip {filename} && cd claude-code-package && ./install.sh")
+
+                console.print("\n[cyan]For Windows PowerShell:[/cyan]")
+                console.print("1. Download (copy entire line):")
+                print(f'   Invoke-WebRequest -Uri "{url}" -OutFile "{filename}"')
+                console.print("2. Extract and install:")
+                console.print(f'   Expand-Archive -Path "{filename}" -DestinationPath "."')
+                console.print("   cd claude-code-package")
+                console.print("   .\\install.bat")
+
+                console.print(f"\n[dim]Verify download with: sha256sum {filename} (or Get-FileHash on Windows)[/dim]")
         else:
             # Show local package details
             console.print("\n[bold]Package Details:[/bold]")

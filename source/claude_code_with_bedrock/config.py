@@ -51,6 +51,7 @@ class Profile:
     enable_distribution: bool = False  # Enable package distribution features (legacy, use distribution_type)
 
     # Distribution platform configuration
+    aws_org_id: str | None = None  # AWS Organization ID (e.g. o-xxxxxxxxxx) for org-wide S3 access
     distribution_type: str | None = None  # "presigned-s3" | "landing-page" | None (disabled)
     distribution_idp_provider: str | None = None  # "okta" | "azure" | "auth0" | "cognito" (for landing-page only)
     distribution_idp_domain: str | None = None  # IdP domain for web auth (e.g., "company.okta.com")

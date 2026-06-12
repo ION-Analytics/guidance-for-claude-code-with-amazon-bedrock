@@ -1182,11 +1182,13 @@ class MultiProviderAuth:
             # https://aws.amazon.com/tags claim. Use the Cognito Identity Pool
             # path (FederationType=cognito) for automatic tag mapping via
             # PrincipalTags without IdP-side configuration.
+            duration = self.config.get("max_session_duration", 43200)
+            self._debug_print(f"Requesting session duration: {duration}s ({duration//3600}h)")
             assume_role_params = {
                 "RoleArn": federated_role_arn,
                 "RoleSessionName": session_name,
                 "WebIdentityToken": id_token,
-                "DurationSeconds": self.config.get("max_session_duration", 43200),  # 12 hours
+                "DurationSeconds": duration,
             }
 
             # Inject model allowlist as a session policy if the quota check returned one

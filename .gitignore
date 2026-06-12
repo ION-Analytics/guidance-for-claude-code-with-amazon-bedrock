@@ -6,6 +6,12 @@ build/
 *.egg-info/
 *.spec
 
+# Nuitka build artifacts
+source/credential-process
+source/__main__.dist/
+source/__main__.build/
+source/__main__.onefile-build/
+
 # Python cache
 __pycache__/
 *.pyc
