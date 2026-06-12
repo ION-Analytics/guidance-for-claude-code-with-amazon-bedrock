@@ -977,7 +977,7 @@ class QuotaPolicy:
     warning_threshold_90: int | None = None
 
     # Enforcement (Phase 1: alert only, Phase 2: block support)
-    enforcement_mode: EnforcementMode = EnforcementMode.ALERT
+    monthly_enforcement_mode: EnforcementMode = EnforcementMode.ALERT
     daily_enforcement_mode: EnforcementMode = EnforcementMode.ALERT
 
     # Model access restriction — if set, session policy limits invocations to these model ID prefixes
@@ -1006,7 +1006,7 @@ class QuotaPolicy:
             "monthly_token_limit": self.monthly_token_limit,
             "warning_threshold_80": self.warning_threshold_80,
             "warning_threshold_90": self.warning_threshold_90,
-            "enforcement_mode": self.enforcement_mode.value,
+            "monthly_enforcement_mode": self.monthly_enforcement_mode.value,
             "daily_enforcement_mode": self.daily_enforcement_mode.value,
             "enabled": self.enabled,
         }

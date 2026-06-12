@@ -116,14 +116,14 @@ def lambda_handler(event, context):
         usage_summary = build_usage_summary(usage, policy)
 
         # 4. Check if enforcement mode is "block"
-        enforcement_mode = policy.get("enforcement_mode", "alert")
+        monthly_enforcement_mode = policy.get("monthly_enforcement_mode", "alert")
 
-        if enforcement_mode != "block":
+        if monthly_enforcement_mode != "block":
             # Alert-only mode - always allow
             return build_response(200, {
                 "allowed": True,
                 "reason": "within_quota",
-                "enforcement_mode": enforcement_mode,
+                "enforcement_mode": monthly_enforcement_mode,
                 "usage": usage_summary,
                 "policy": {
                     "type": policy.get("policy_type"),
@@ -151,7 +151,7 @@ def lambda_handler(event, context):
             return build_response(200, {
                 "allowed": False,
                 "reason": "monthly_cost_exceeded",
-                "enforcement_mode": enforcement_mode,
+                "enforcement_mode": monthly_enforcement_mode,
                 "usage": usage_summary,
                 "policy": {
                     "type": policy.get("policy_type"),
@@ -168,7 +168,7 @@ def lambda_handler(event, context):
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_cost_exceeded",
-                    "enforcement_mode": enforcement_mode,
+                    "enforcement_mode": monthly_enforcement_mode,
                     "usage": usage_summary,
                     "policy": {
                         "type": policy.get("policy_type"),
@@ -183,7 +183,7 @@ def lambda_handler(event, context):
             return build_response(200, {
                 "allowed": False,
                 "reason": "monthly_exceeded",
-                "enforcement_mode": enforcement_mode,
+                "enforcement_mode": monthly_enforcement_mode,
                 "usage": usage_summary,
                 "policy": {
                     "type": policy.get("policy_type"),
@@ -199,7 +199,7 @@ def lambda_handler(event, context):
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_exceeded",
-                    "enforcement_mode": enforcement_mode,
+                    "enforcement_mode": monthly_enforcement_mode,
                     "usage": usage_summary,
                     "policy": {
                         "type": policy.get("policy_type"),
@@ -371,7 +371,7 @@ def get_policy(policy_type: str, identifier: str) -> dict | None:
             "daily_cost_limit": float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
             "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
             "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
-            "enforcement_mode": item.get("enforcement_mode", "alert"),
+            "monthly_enforcement_mode": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
             "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
             "enabled": item.get("enabled", True),
             "allowed_models": list(item["allowed_models"]) if item.get("allowed_models") else None,

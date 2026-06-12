@@ -119,7 +119,7 @@ class QuotaPolicyManager:
         daily_cost_limit: float | None = None,
         warning_threshold_80: int | None = None,
         warning_threshold_90: int | None = None,
-        enforcement_mode: EnforcementMode = EnforcementMode.ALERT,
+        monthly_enforcement_mode: EnforcementMode = EnforcementMode.ALERT,
         daily_enforcement_mode: EnforcementMode = EnforcementMode.ALERT,
         enabled: bool = True,
         created_by: str | None = None,
@@ -134,7 +134,7 @@ class QuotaPolicyManager:
             daily_token_limit: Optional daily token limit.
             warning_threshold_80: Optional 80% warning threshold. Auto-calculated if not provided.
             warning_threshold_90: Optional 90% warning threshold. Auto-calculated if not provided.
-            enforcement_mode: Monthly enforcement mode - alert or block (default: alert).
+            monthly_enforcement_mode: Monthly enforcement mode - alert or block (default: alert).
             daily_enforcement_mode: Daily enforcement mode - alert or block (default: alert).
             enabled: Whether the policy is enabled (default: True).
             created_by: Admin email who created the policy.
@@ -168,7 +168,7 @@ class QuotaPolicyManager:
             daily_cost_limit=daily_cost_limit,
             warning_threshold_80=warning_threshold_80,
             warning_threshold_90=warning_threshold_90,
-            enforcement_mode=enforcement_mode,
+            monthly_enforcement_mode=monthly_enforcement_mode,
             daily_enforcement_mode=daily_enforcement_mode,
             enabled=enabled,
             allowed_models=allowed_models,
@@ -230,7 +230,7 @@ class QuotaPolicyManager:
         daily_cost_limit: float | None = None,
         warning_threshold_80: int | None = None,
         warning_threshold_90: int | None = None,
-        enforcement_mode: EnforcementMode | None = None,
+        monthly_enforcement_mode: EnforcementMode | None = None,
         daily_enforcement_mode: EnforcementMode | None = None,
         enabled: bool | None = None,
         allowed_models: list[str] | None = None,
@@ -244,7 +244,7 @@ class QuotaPolicyManager:
             daily_token_limit: New daily token limit (optional).
             warning_threshold_80: New 80% threshold (optional).
             warning_threshold_90: New 90% threshold (optional).
-            enforcement_mode: New monthly enforcement mode (optional).
+            monthly_enforcement_mode: New monthly enforcement mode (optional).
             daily_enforcement_mode: New daily enforcement mode (optional).
             enabled: New enabled status (optional).
 
@@ -304,9 +304,9 @@ class QuotaPolicyManager:
             update_parts.append("warning_threshold_90 = :warn_90")
             expression_values[":warn_90"] = warning_threshold_90
 
-        if enforcement_mode is not None:
-            update_parts.append("enforcement_mode = :mode")
-            expression_values[":mode"] = enforcement_mode.value
+        if monthly_enforcement_mode is not None:
+            update_parts.append("monthly_enforcement_mode = :mode")
+            expression_values[":mode"] = monthly_enforcement_mode.value
 
         if daily_enforcement_mode is not None:
             update_parts.append("daily_enforcement_mode = :daily_mode")
