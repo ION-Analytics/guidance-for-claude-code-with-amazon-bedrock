@@ -49,7 +49,7 @@ PROVIDER_CONFIGS = {
         "name": "Okta",
         "authorize_endpoint": "/oauth2/v1/authorize",
         "token_endpoint": "/oauth2/v1/token",
-        "scopes": "openid profile email",
+        "scopes": "openid profile email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -57,7 +57,7 @@ PROVIDER_CONFIGS = {
         "name": "Auth0",
         "authorize_endpoint": "/authorize",
         "token_endpoint": "/oauth/token",
-        "scopes": "openid profile email",
+        "scopes": "openid profile email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -65,7 +65,7 @@ PROVIDER_CONFIGS = {
         "name": "Azure AD",
         "authorize_endpoint": "/oauth2/v2.0/authorize",
         "token_endpoint": "/oauth2/v2.0/token",
-        "scopes": "openid profile email",
+        "scopes": "openid profile email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -73,7 +73,7 @@ PROVIDER_CONFIGS = {
         "name": "AWS Cognito User Pool",
         "authorize_endpoint": "/oauth2/authorize",
         "token_endpoint": "/oauth2/token",
-        "scopes": "openid email",
+        "scopes": "openid email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -83,7 +83,7 @@ PROVIDER_CONFIGS = {
         "name": "Generic OIDC",
         "authorize_endpoint": "",
         "token_endpoint": "",
-        "scopes": "openid profile email",
+        "scopes": "openid profile email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -560,14 +560,18 @@ class MultiProviderAuth:
             except Exception as e:
                 self._debug_print(f"Could not clear credentials file: {e}")
 
-        # Clear monitoring token from session directory
+        # Clear monitoring token and refresh token from session directory
         session_dir = Path.home() / ".claude-code-session"
         if session_dir.exists():
             monitoring_file = session_dir / f"{self.profile}-monitoring.json"
-
             if monitoring_file.exists():
                 monitoring_file.unlink()
                 cleared_items.append("monitoring token file")
+
+            refresh_file = session_dir / f"{self.profile}-refresh.json"
+            if refresh_file.exists():
+                refresh_file.unlink()
+                cleared_items.append("refresh token file")
 
             # Remove directory if empty
             try:
@@ -1081,6 +1085,11 @@ class MultiProviderAuth:
             for claim in important_claims:
                 if claim in id_token_claims:
                     self._debug_print(f"{claim}: {id_token_claims[claim]}")
+
+        # Persist refresh_token if the IdP issued one (e.g. offline_access granted)
+        refresh_token = tokens.get("refresh_token", "")
+        if refresh_token:
+            self._save_refresh_token(refresh_token)
 
         return tokens["id_token"], id_token_claims
 
@@ -2126,6 +2135,102 @@ class MultiProviderAuth:
             self._debug_print(f"Silent refresh failed, will require browser auth: {e}")
             return None, None, None
 
+    def _save_refresh_token(self, refresh_token: str) -> None:
+        session_dir = Path.home() / ".claude-code-session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        refresh_file = session_dir / f"{self.profile}-refresh.json"
+        tmp = refresh_file.with_suffix(".json.tmp")
+        import time as _time
+        data = {"refresh_token": refresh_token, "profile": self.profile, "updated_at": int(_time.time())}
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.rename(refresh_file)
+
+    def _load_refresh_token(self) -> str:
+        refresh_file = Path.home() / ".claude-code-session" / f"{self.profile}-refresh.json"
+        try:
+            data = json.loads(refresh_file.read_text(encoding="utf-8"))
+            return data.get("refresh_token", "")
+        except Exception:
+            return ""
+
+    def _try_refresh_token(self):
+        """Attempt to get fresh AWS credentials via a stored OIDC refresh_token.
+
+        Called after _try_silent_refresh() fails (id_token expired) but before
+        the browser popup. If the IdP honours the offline_access scope and has
+        issued a refresh_token, this gives the user a silent renewal window of
+        typically 7-30 days (IdP-dependent).
+
+        Returns:
+            Tuple of (credentials, id_token, token_claims) on success, else (None, None, None).
+        """
+        refresh_token = self._load_refresh_token()
+        if not refresh_token:
+            self._debug_print("No cached refresh_token, cannot refresh silently")
+            return None, None, None
+
+        self._debug_print("Found cached refresh_token, attempting token exchange...")
+
+        try:
+            # Build token endpoint URL
+            configured_token = self.config.get("oidc_token_endpoint")
+            if configured_token:
+                token_url = configured_token
+            else:
+                provider_domain = self.config.get("provider_domain", "")
+                base_url = f"https://{provider_domain}"
+                token_url = f"{base_url}{self.provider_config['token_endpoint']}"
+
+            token_data = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": self.config["client_id"],
+            }
+
+            # Confidential client auth (same as code exchange)
+            if self.config.get("client_certificate_path") and self.config.get("client_certificate_key_path"):
+                token_data["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                token_data["client_assertion"] = self._build_client_assertion(token_url)
+            elif self.config.get("client_secret"):
+                token_data["client_secret"] = self.config["client_secret"]
+
+            resp = requests.post(
+                token_url,
+                data=token_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+
+            if not resp.ok:
+                self._debug_print(f"Refresh token exchange failed (HTTP {resp.status_code}), clearing stored token")
+                session_dir = Path.home() / ".claude-code-session"
+                refresh_file = session_dir / f"{self.profile}-refresh.json"
+                refresh_file.unlink(missing_ok=True)
+                return None, None, None
+
+            tokens = resp.json()
+            id_token = tokens.get("id_token", "")
+            if not id_token:
+                self._debug_print("Refresh response did not contain an id_token")
+                return None, None, None
+
+            token_claims = jwt.decode(id_token, options={"verify_signature": False})
+
+            # Save rotated refresh_token if IdP issued a new one
+            new_refresh = tokens.get("refresh_token", "")
+            self._save_refresh_token(new_refresh or refresh_token)
+
+            credentials = self.get_aws_credentials(id_token, token_claims)
+            self.save_credentials(credentials)
+            self.save_monitoring_token(id_token, token_claims)
+            self._debug_print("Refresh token exchange succeeded")
+            return credentials, id_token, token_claims
+
+        except Exception as e:
+            self._debug_print(f"Refresh token exchange failed: {e}")
+            return None, None, None
+
     def _ensure_daemon_running(self) -> None:
         """Spawn the credential daemon if it is not already running."""
         install_dir = Path.home() / "claude-code-with-bedrock"
@@ -2233,6 +2338,22 @@ class MultiProviderAuth:
             silent_creds, id_token, token_claims = self._try_silent_refresh()
             if silent_creds:
                 print(json.dumps(silent_creds))
+                return 0
+
+            # Try refresh_token exchange before browser popup
+            # Handles the case where the id_token has expired but a long-lived
+            # refresh_token (offline_access) is still valid (typically 7-30 days).
+            refresh_creds, id_token, token_claims = self._try_refresh_token()
+            if refresh_creds:
+                if id_token and self._should_check_quota():
+                    self._debug_print("Checking quota after refresh token exchange...")
+                    quota_result = self._check_quota(token_claims, id_token)
+                    self._save_quota_check_timestamp()
+                    if not quota_result.get("allowed", True):
+                        return self._handle_quota_blocked(quota_result)
+                    else:
+                        self._handle_quota_warning(quota_result)
+                print(json.dumps(refresh_creds))
                 return 0
 
             # Authenticate with OIDC provider (browser popup - only when id_token is also expired)
