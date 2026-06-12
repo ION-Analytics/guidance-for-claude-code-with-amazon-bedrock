@@ -2044,6 +2044,9 @@ RUN pyinstaller \
 # Organization: {profile.provider_domain}
 # Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 set -e
 
 echo "======================================"
@@ -2325,6 +2328,8 @@ setlocal enabledelayedexpansion
 REM Claude Code Authentication Installer for Windows
 REM Organization: {profile.provider_domain}
 REM Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+cd /d "%~dp0"
 
 echo ======================================
 echo Claude Code Authentication Installer
