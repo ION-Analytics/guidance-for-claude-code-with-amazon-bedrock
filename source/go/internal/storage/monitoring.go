@@ -76,6 +76,13 @@ func readMonitoringTokenFromFile(profile string) (*MonitoringTokenData, error) {
 	return &data, nil
 }
 
+// ClearMonitoringToken removes the cached monitoring token for a profile.
+func ClearMonitoringToken(profile, storageType string) {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".claude-code-session", profile+"-monitoring.json")
+	os.Remove(path)
+}
+
 func saveMonitoringTokenToFile(data *MonitoringTokenData, profile string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {

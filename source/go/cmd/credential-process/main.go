@@ -19,6 +19,7 @@ import (
 	"ccwb-go/internal/quota"
 	"ccwb-go/internal/storage"
 	"ccwb-go/internal/version"
+	"golang.org/x/term"
 )
 
 var debug bool
@@ -45,6 +46,7 @@ func main() {
 	refreshIfNeeded := flag.Bool("refresh-if-needed", false, "Refresh credentials if expired")
 	showTags := flag.Bool("show-tags", false, "Print the https://aws.amazon.com/tags claim from the cached ID token (debug)")
 	getTag := flag.String("get-tag", "", "Print the value of a single principal tag from the cached ID token (e.g. --get-tag Zone). Exit codes: 0 hit, 2 absent, 4 expired.")
+	setClientSecret := flag.Bool("set-client-secret", false, "Prompt for and store an Azure client secret in the OS keyring")
 	flag.Parse()
 
 	if *versionFlag || *shortVersion {
@@ -111,6 +113,27 @@ func main() {
 
 	if *clearCache {
 		app.clearCache()
+		os.Exit(0)
+	}
+
+	if *setClientSecret {
+		fmt.Fprint(os.Stderr, "Enter Azure client secret: ")
+		secretBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr) // newline after hidden input
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			os.Exit(1)
+		}
+		secret := strings.TrimSpace(string(secretBytes))
+		if secret == "" {
+			fmt.Fprintln(os.Stderr, "Error: no secret entered")
+			os.Exit(1)
+		}
+		if err := storage.WriteClientSecret(profile, cfg.CredentialStorage, secret); err != nil {
+			fmt.Fprintf(os.Stderr, "Error storing client secret: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Client secret stored for profile '%s'\n", profile)
 		os.Exit(0)
 	}
 
@@ -209,6 +232,10 @@ func (a *credentialApp) clearCache() {
 	_ = storage.SaveToCredentialsFile(expired, a.profile)
 	// Clear refresh token
 	storage.ClearRefreshToken(a.profile)
+	// Clear monitoring token (used by trySilentRefresh) so next run requires fresh browser auth
+	storage.ClearMonitoringToken(a.profile, a.cfg.CredentialStorage)
+	// Clear quota check timestamp so next run re-checks quota immediately
+	os.Remove(a.quotaTimestampPath())
 	fmt.Fprintf(os.Stderr, "Cleared cached credentials for profile '%s'\n", a.profile)
 }
 
@@ -363,9 +390,11 @@ func (a *credentialApp) getTag(key string) int {
 func (a *credentialApp) run() int {
 	// Check cache first
 	if cached := a.getCachedCredentials(); cached != nil {
-		// Periodic quota re-check
+		// Periodic quota re-check — must happen before returning cached creds
 		if a.shouldRecheckQuota() {
-			a.performQuotaRecheck()
+			if blocked := a.performQuotaRecheck(); blocked {
+				return 1
+			}
 		}
 		outputJSON(cached)
 		return 0
@@ -408,6 +437,7 @@ func (a *credentialApp) run() int {
 					printQuotaBlocked(qr)
 					return 1
 				}
+				printQuotaWarning(qr)
 			}
 		}
 		outputJSON(creds)
@@ -426,6 +456,7 @@ func (a *credentialApp) run() int {
 					printQuotaBlocked(qr)
 					return 1
 				}
+				printQuotaWarning(qr)
 			}
 		}
 		outputJSON(creds)
@@ -450,6 +481,7 @@ func (a *credentialApp) run() int {
 			printQuotaBlocked(qr)
 			return 1
 		}
+		printQuotaWarning(qr)
 		// Build model session policy if the quota response restricts allowed models
 		if len(qr.AllowedModels) > 0 {
 			sessionPolicy = buildModelSessionPolicy(qr.AllowedModels)
@@ -526,14 +558,14 @@ func (a *credentialApp) resolveConfidentialAuth() (*oidc.ConfidentialAuth, error
 	}
 	switch mode {
 	case "secret":
-		secret, err := storage.ReadClientSecret(a.profile)
+		secret, err := storage.ReadClientSecret(a.profile, a.cfg.CredentialStorage)
 		if err != nil {
 			return nil, fmt.Errorf("reading client secret from keyring: %w", err)
 		}
 		if secret == "" {
 			return nil, fmt.Errorf(
 				"azure_auth_mode is 'secret' but no client secret is stored.\n"+
-					"Run: ccwb init --profile %s (re-run the Azure step) to store one in the OS keyring.",
+					"Run: credential-process --profile %s --set-client-secret",
 				a.profile)
 		}
 		return &oidc.ConfidentialAuth{ClientSecret: secret}, nil
@@ -730,20 +762,19 @@ func (a *credentialApp) shouldRecheckQuota() bool {
 	return time.Since(last) > time.Duration(interval)*time.Minute
 }
 
-func (a *credentialApp) performQuotaRecheck() {
+func (a *credentialApp) performQuotaRecheck() bool {
 	token, _ := storage.GetMonitoringToken(a.profile, a.cfg.CredentialStorage)
 	if token == "" {
-		return
+		return false
 	}
-	claims, err := jwt.DecodePayload(token)
-	if err != nil {
-		return
-	}
+	a.saveQuotaCheckTimestamp()
 	qr := quota.Check(a.cfg.QuotaAPIEndpoint, token, a.cfg.QuotaCheckTimeout, a.cfg.QuotaFailMode)
-	_ = claims // suppress unused
 	if !qr.Allowed {
 		printQuotaBlocked(qr)
+		return true
 	}
+	printQuotaWarning(qr)
+	return false
 }
 
 // buildModelSessionPolicy constructs an IAM session policy that denies access
@@ -785,6 +816,63 @@ func buildModelSessionPolicy(allowedModels []string) string {
 		return ""
 	}
 	return policy
+}
+
+func quotaFloat(usage map[string]interface{}, key string) float64 {
+	if v, ok := usage[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+func printQuotaWarning(qr *quota.Result) {
+	usage := qr.Usage
+	if usage == nil {
+		return
+	}
+	monthlyCostPct := quotaFloat(usage, "monthly_cost_percent")
+	dailyCostPct := quotaFloat(usage, "daily_cost_percent")
+	monthlyPct := quotaFloat(usage, "monthly_percent")
+	dailyPct := quotaFloat(usage, "daily_percent")
+
+	if monthlyCostPct < 80 && dailyCostPct < 80 && monthlyPct < 80 && dailyPct < 80 {
+		return
+	}
+
+	var trigger string
+	switch {
+	case monthlyCostPct >= 80:
+		trigger = "monthly cost"
+	case dailyCostPct >= 80:
+		trigger = "daily cost"
+	case monthlyPct >= 80:
+		trigger = "monthly token usage"
+	default:
+		trigger = "daily token usage"
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "============================================================")
+	fmt.Fprintln(os.Stderr, "QUOTA WARNING")
+	fmt.Fprintln(os.Stderr, "============================================================")
+	fmt.Fprintf(os.Stderr, "  Triggered by: %s\n", trigger)
+	if _, ok := usage["monthly_tokens"]; ok {
+		fmt.Fprintf(os.Stderr, "  Monthly tokens: %.0f / %.0f (%.1f%%)\n",
+			quotaFloat(usage, "monthly_tokens"), quotaFloat(usage, "monthly_limit"), monthlyPct)
+	}
+	if _, ok := usage["daily_tokens"]; ok {
+		fmt.Fprintf(os.Stderr, "  Daily tokens:   %.0f / %.0f (%.1f%%)\n",
+			quotaFloat(usage, "daily_tokens"), quotaFloat(usage, "daily_limit"), dailyPct)
+	}
+	if _, ok := usage["monthly_cost_limit"]; ok {
+		fmt.Fprintf(os.Stderr, "  Monthly cost:   $%.4f / $%.2f (%.1f%%)\n",
+			quotaFloat(usage, "total_cost"), quotaFloat(usage, "monthly_cost_limit"), monthlyCostPct)
+	}
+	if _, ok := usage["daily_cost_limit"]; ok {
+		fmt.Fprintf(os.Stderr, "  Daily cost:     $%.4f / $%.2f (%.1f%%)\n",
+			quotaFloat(usage, "daily_cost"), quotaFloat(usage, "daily_cost_limit"), dailyCostPct)
+	}
+	fmt.Fprintln(os.Stderr, "============================================================")
 }
 
 func printQuotaBlocked(qr *quota.Result) {

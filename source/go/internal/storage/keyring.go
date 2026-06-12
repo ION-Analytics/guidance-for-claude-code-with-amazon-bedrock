@@ -3,7 +3,10 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/99designs/keyring"
 	"ccwb-go/internal/federation"
@@ -12,7 +15,7 @@ import (
 const serviceName = "claude-code-with-bedrock"
 
 func openKeyring() (keyring.Keyring, error) {
-	return keyring.Open(keyring.Config{
+	cfg := keyring.Config{
 		ServiceName: serviceName,
 		// macOS Keychain
 		KeychainName:             "login",
@@ -21,7 +24,18 @@ func openKeyring() (keyring.Keyring, error) {
 		LibSecretCollectionName: serviceName,
 		// Windows Credential Manager
 		WinCredPrefix: serviceName,
-	})
+	}
+	// Pin to the native backend for the current OS so the library never falls
+	// through to 'pass' or other CLI-based backends that may be installed.
+	switch runtime.GOOS {
+	case "darwin":
+		cfg.AllowedBackends = []keyring.BackendType{keyring.KeychainBackend}
+	case "linux":
+		cfg.AllowedBackends = []keyring.BackendType{keyring.SecretServiceBackend}
+	case "windows":
+		cfg.AllowedBackends = []keyring.BackendType{keyring.WinCredBackend}
+	}
+	return keyring.Open(cfg)
 }
 
 // ReadFromKeyring reads AWS credentials from the OS keyring.
@@ -81,24 +95,64 @@ func ClearKeyring(profile string) error {
 	return SaveToKeyring(expired, profile)
 }
 
-// ReadClientSecret reads an Azure confidential-client secret from the OS keyring.
-// Entry name matches what the Python ccwb init wizard writes: "{profile}-client-secret"
-// under service "claude-code-with-bedrock". Returns empty string with no error
-// when the entry is absent -- the caller decides whether that is fatal based on
-// azure_auth_mode.
-func ReadClientSecret(profile string) (string, error) {
-	kr, err := openKeyring()
+// ReadClientSecret reads an Azure confidential-client secret.
+// When storageType is "keyring" it reads from the OS keyring (matches what the
+// Python ccwb init wizard writes). Otherwise it reads from the session file at
+// ~/.claude-code-session/{profile}-client-secret (CGO-free, session storage).
+func ReadClientSecret(profile, storageType string) (string, error) {
+	if storageType == "keyring" {
+		kr, err := openKeyring()
+		if err != nil {
+			return "", err
+		}
+		item, err := kr.Get(profile + "-client-secret")
+		if err != nil {
+			if errors.Is(err, keyring.ErrKeyNotFound) {
+				return "", nil
+			}
+			return "", err
+		}
+		return string(item.Data), nil
+	}
+	// session / file storage
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	item, err := kr.Get(profile + "-client-secret")
+	data, err := os.ReadFile(filepath.Join(home, ".claude-code-session", profile+"-client-secret"))
 	if err != nil {
-		if errors.Is(err, keyring.ErrKeyNotFound) {
+		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", err
 	}
-	return string(item.Data), nil
+	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// WriteClientSecret stores an Azure confidential-client secret.
+// When storageType is "keyring" it writes to the OS keyring. Otherwise it writes
+// to ~/.claude-code-session/{profile}-client-secret with 0600 permissions.
+func WriteClientSecret(profile, storageType, secret string) error {
+	if storageType == "keyring" {
+		kr, err := openKeyring()
+		if err != nil {
+			return err
+		}
+		return kr.Set(keyring.Item{
+			Key:  profile + "-client-secret",
+			Data: []byte(secret),
+		})
+	}
+	// session / file storage
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".claude-code-session")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, profile+"-client-secret"), []byte(secret), 0600)
 }
 
 // ReadMonitoringTokenFromKeyring reads the monitoring token from keyring.
