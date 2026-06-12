@@ -56,18 +56,23 @@ def _calc_cost(inp, out, cache_r, cache_w, model_id):
 
 def _short_model(model_id):
     m = model_id.split("/")[-1].split(".")[-1].lower()
-    if "opus" in m:
-        return "Opus"
-    if "sonnet" in m:
-        parts = m.split("-")
-        try:
-            idx = parts.index("sonnet")
-            ver = parts[idx + 1] if idx + 1 < len(parts) else ""
-            return f"Sonnet {ver}" if ver.replace(".", "").isdigit() else "Sonnet"
-        except ValueError:
-            return "Sonnet"
-    if "haiku" in m:
-        return "Haiku"
+    for name in ("opus", "sonnet", "haiku"):
+        if name in m:
+            parts = m.split("-")
+            try:
+                idx = parts.index(name)
+                major = parts[idx + 1] if idx + 1 < len(parts) else ""
+                minor = parts[idx + 2] if idx + 2 < len(parts) else ""
+                if major.isdigit() and minor.isdigit():
+                    ver = f"{major}.{minor}"
+                elif major.isdigit():
+                    ver = major
+                else:
+                    ver = ""
+                label = name.capitalize()
+                return f"{label} {ver}" if ver else label
+            except (ValueError, IndexError):
+                return name.capitalize()
     return m[:12]
 
 
