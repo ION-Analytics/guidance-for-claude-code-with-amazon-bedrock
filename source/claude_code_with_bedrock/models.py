@@ -978,6 +978,7 @@ class QuotaPolicy:
 
     # Enforcement (Phase 1: alert only, Phase 2: block support)
     enforcement_mode: EnforcementMode = EnforcementMode.ALERT
+    daily_enforcement_mode: EnforcementMode = EnforcementMode.ALERT
 
     # Model access restriction — if set, session policy limits invocations to these model ID prefixes
     # e.g. ["eu.anthropic.claude-haiku-*", "eu.anthropic.claude-sonnet-*"]
@@ -1006,6 +1007,7 @@ class QuotaPolicy:
             "warning_threshold_80": self.warning_threshold_80,
             "warning_threshold_90": self.warning_threshold_90,
             "enforcement_mode": self.enforcement_mode.value,
+            "daily_enforcement_mode": self.daily_enforcement_mode.value,
             "enabled": self.enabled,
         }
 

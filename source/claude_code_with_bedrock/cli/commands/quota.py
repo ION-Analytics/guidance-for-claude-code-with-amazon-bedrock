@@ -167,7 +167,8 @@ class QuotaSetUserCommand(Command):
         option("daily-limit", "d", description="Daily token limit (e.g., 15M)", flag=False),
         option("monthly-cost-limit", description="Monthly cost limit in USD (e.g., 30.00)", flag=False),
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
-        option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("monthly-enforcement", "e", description="Monthly enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("daily-enforcement", description="Daily enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
         option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet or eu.anthropic.claude-haiku*). Omit to allow all models.", flag=False),
     ]
@@ -229,15 +230,26 @@ class QuotaSetUserCommand(Command):
                 console.print(f"[red]Invalid daily cost limit: {daily_cost_str}[/red]")
                 return 1
 
-        # Parse enforcement mode
+        # Parse monthly enforcement mode
         enforcement_mode = EnforcementMode.ALERT
-        enforcement_str = self.option("enforcement")
+        enforcement_str = self.option("monthly-enforcement")
         if enforcement_str:
             enforcement_str = enforcement_str.lower().strip()
             if enforcement_str == "block":
                 enforcement_mode = EnforcementMode.BLOCK
             elif enforcement_str != "alert":
-                console.print(f"[red]Invalid enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                console.print(f"[red]Invalid monthly enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                return 1
+
+        # Parse daily enforcement mode
+        daily_enforcement_mode = EnforcementMode.ALERT
+        daily_enforcement_str = self.option("daily-enforcement")
+        if daily_enforcement_str:
+            daily_enforcement_str = daily_enforcement_str.lower().strip()
+            if daily_enforcement_str == "block":
+                daily_enforcement_mode = EnforcementMode.BLOCK
+            elif daily_enforcement_str != "alert":
+                console.print(f"[red]Invalid daily enforcement mode: {daily_enforcement_str}. Use 'alert' or 'block'.[/red]")
                 return 1
 
         enabled = not self.option("disabled")
@@ -257,6 +269,7 @@ class QuotaSetUserCommand(Command):
                 monthly_cost_limit=monthly_cost_limit,
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
+                daily_enforcement_mode=daily_enforcement_mode,
                 enabled=enabled,
                 allowed_models=allowed_models,
             )
@@ -268,7 +281,8 @@ class QuotaSetUserCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
@@ -295,7 +309,8 @@ class QuotaSetUserCommand(Command):
                     console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-                console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
                 if policy.allowed_models:
                     console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
@@ -324,7 +339,8 @@ class QuotaSetGroupCommand(Command):
         option("daily-limit", "d", description="Daily token limit (e.g., 15M)", flag=False),
         option("monthly-cost-limit", description="Monthly cost limit in USD (e.g., 30.00)", flag=False),
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
-        option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("monthly-enforcement", "e", description="Monthly enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("daily-enforcement", description="Daily enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
         option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet). Omit to allow all models.", flag=False),
     ]
@@ -380,15 +396,26 @@ class QuotaSetGroupCommand(Command):
                 console.print(f"[red]Invalid daily cost limit: {daily_cost_str}[/red]")
                 return 1
 
-        # Parse enforcement mode
+        # Parse monthly enforcement mode
         enforcement_mode = EnforcementMode.ALERT
-        enforcement_str = self.option("enforcement")
+        enforcement_str = self.option("monthly-enforcement")
         if enforcement_str:
             enforcement_str = enforcement_str.lower().strip()
             if enforcement_str == "block":
                 enforcement_mode = EnforcementMode.BLOCK
             elif enforcement_str != "alert":
-                console.print(f"[red]Invalid enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                console.print(f"[red]Invalid monthly enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                return 1
+
+        # Parse daily enforcement mode
+        daily_enforcement_mode = EnforcementMode.ALERT
+        daily_enforcement_str = self.option("daily-enforcement")
+        if daily_enforcement_str:
+            daily_enforcement_str = daily_enforcement_str.lower().strip()
+            if daily_enforcement_str == "block":
+                daily_enforcement_mode = EnforcementMode.BLOCK
+            elif daily_enforcement_str != "alert":
+                console.print(f"[red]Invalid daily enforcement mode: {daily_enforcement_str}. Use 'alert' or 'block'.[/red]")
                 return 1
 
         enabled = not self.option("disabled")
@@ -408,6 +435,7 @@ class QuotaSetGroupCommand(Command):
                 monthly_cost_limit=monthly_cost_limit,
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
+                daily_enforcement_mode=daily_enforcement_mode,
                 enabled=enabled,
                 allowed_models=allowed_models,
             )
@@ -419,7 +447,8 @@ class QuotaSetGroupCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
@@ -446,7 +475,8 @@ class QuotaSetGroupCommand(Command):
                     console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-                console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
                 if policy.allowed_models:
                     console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
@@ -471,7 +501,8 @@ class QuotaSetDefaultCommand(Command):
         option("daily-limit", "d", description="Daily token limit (e.g., 15M)", flag=False),
         option("monthly-cost-limit", description="Monthly cost limit in USD (e.g., 30.00)", flag=False),
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
-        option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("monthly-enforcement", "e", description="Monthly enforcement mode: 'alert' (default) or 'block'", flag=False),
+        option("daily-enforcement", description="Daily enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
         option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet). Omit to allow all models.", flag=False),
     ]
@@ -526,15 +557,26 @@ class QuotaSetDefaultCommand(Command):
                 console.print(f"[red]Invalid daily cost limit: {daily_cost_str}[/red]")
                 return 1
 
-        # Parse enforcement mode
+        # Parse monthly enforcement mode
         enforcement_mode = EnforcementMode.ALERT
-        enforcement_str = self.option("enforcement")
+        enforcement_str = self.option("monthly-enforcement")
         if enforcement_str:
             enforcement_str = enforcement_str.lower().strip()
             if enforcement_str == "block":
                 enforcement_mode = EnforcementMode.BLOCK
             elif enforcement_str != "alert":
-                console.print(f"[red]Invalid enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                console.print(f"[red]Invalid monthly enforcement mode: {enforcement_str}. Use 'alert' or 'block'.[/red]")
+                return 1
+
+        # Parse daily enforcement mode
+        daily_enforcement_mode = EnforcementMode.ALERT
+        daily_enforcement_str = self.option("daily-enforcement")
+        if daily_enforcement_str:
+            daily_enforcement_str = daily_enforcement_str.lower().strip()
+            if daily_enforcement_str == "block":
+                daily_enforcement_mode = EnforcementMode.BLOCK
+            elif daily_enforcement_str != "alert":
+                console.print(f"[red]Invalid daily enforcement mode: {daily_enforcement_str}. Use 'alert' or 'block'.[/red]")
                 return 1
 
         enabled = not self.option("disabled")
@@ -554,6 +596,7 @@ class QuotaSetDefaultCommand(Command):
                 monthly_cost_limit=monthly_cost_limit,
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
+                daily_enforcement_mode=daily_enforcement_mode,
                 enabled=enabled,
                 allowed_models=allowed_models,
             )
@@ -565,7 +608,8 @@ class QuotaSetDefaultCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
@@ -592,7 +636,8 @@ class QuotaSetDefaultCommand(Command):
                     console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-                console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+                console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
                 if policy.allowed_models:
                     console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
@@ -800,7 +845,8 @@ class QuotaShowCommand(Command):
             console.print(
                 f"[bold]Status:[/bold] {'[green]Enabled[/green]' if policy.enabled else '[dim]Disabled[/dim]'}"
             )
-            console.print(f"[bold]Enforcement:[/bold] {policy.enforcement_mode.value}")
+            console.print(f"[bold]Monthly Enforcement:[/bold] {policy.enforcement_mode.value}")
+            console.print(f"[bold]Daily Enforcement:[/bold] {policy.daily_enforcement_mode.value}")
             console.print()
 
             table = Table(box=box.SIMPLE, show_header=False)

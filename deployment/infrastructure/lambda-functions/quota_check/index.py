@@ -162,8 +162,9 @@ def lambda_handler(event, context):
             })
 
         # Check daily cost limit
+        daily_enforcement_mode = policy.get("daily_enforcement_mode", "alert")
         if daily_cost_limit and daily_cost_limit > 0 and daily_cost >= daily_cost_limit:
-            if enforcement_mode == "block":
+            if daily_enforcement_mode == "block":
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_cost_exceeded",
@@ -194,7 +195,7 @@ def lambda_handler(event, context):
 
         # Check daily token limit (if configured)
         if daily_limit and daily_limit > 0 and daily_tokens >= daily_limit:
-            if enforcement_mode == "block":
+            if daily_enforcement_mode == "block":
                 return build_response(200, {
                     "allowed": False,
                     "reason": "daily_exceeded",
