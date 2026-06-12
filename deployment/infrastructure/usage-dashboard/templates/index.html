@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bedrock Usage</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2364d0f0'/%3E%3Cstop offset='100%25' stop-color='%235b3fff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg fill='none' stroke='url(%23g)' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3C!-- brain left lobe --%3E%3Cpath d='M32 12 C22 12 14 18 14 26 C14 30 16 33 18 35 C16 37 15 40 16 43 C17 47 21 50 25 50 L32 50'/%3E%3C!-- brain right lobe (circuit side) --%3E%3Cpath d='M32 12 C34 10 38 10 41 12 C45 14 47 18 47 22 C49 23 50 25 50 28 C50 32 48 35 45 36 C46 39 45 43 43 46 C41 49 37 50 32 50'/%3E%3C!-- centre divide --%3E%3Cline x1='32' y1='14' x2='32' y2='50'/%3E%3C!-- circuit lines right --%3E%3Cline x1='47' y1='26' x2='56' y2='26'/%3E%3Ccircle cx='57' cy='26' r='2.5' fill='url(%23g)' stroke='none'/%3E%3Cline x1='46' y1='34' x2='52' y2='34'/%3E%3Cline x1='52' y1='34' x2='52' y2='40'/%3E%3Cline x1='52' y1='40' x2='56' y2='40'/%3E%3Ccircle cx='57' cy='40' r='2.5' fill='url(%23g)' stroke='none'/%3E%3Cline x1='44' y1='42' x2='48' y2='42'/%3E%3Cline x1='48' y1='42' x2='48' y2='48'/%3E%3Ccircle cx='48' cy='49.5' r='2.5' fill='url(%23g)' stroke='none'/%3E%3C/g%3E%3C/svg%3E" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; background: #0d1117; color: #c9d1d9; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d; flex-wrap: wrap; gap: 8px; }
+    header h1 { font-size: 15px; font-weight: 600; color: #58a6ff; }
+    .meta { font-size: 11px; color: #8b949e; }
+    .controls { display: flex; align-items: center; gap: 10px; }
+    select { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+    .badge.live { background: #1a4a1a; color: #3fb950; }
+    .badge.hist { background: #3a2a0a; color: #e3b341; }
+    .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { padding: 20px; color: #f85149; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { position: sticky; top: 0; background: #161b22; color: #8b949e; font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; padding: 8px 12px; text-align: right; border-bottom: 1px solid #30363d; white-space: nowrap; }
+    thead th:first-child, thead th:nth-child(2) { text-align: left; }
+    tbody tr { border-bottom: 1px solid #21262d; transition: background 0.1s; }
+    tbody tr:hover { background: #161b22; }
+    tbody tr.user-first td { border-top: 1px solid #30363d; }
+    tbody tr.user-first td.email { color: #c9d1d9; font-weight: 500; }
+    tbody tr:not(.user-first) td.email { color: transparent; }
+    td { padding: 6px 12px; text-align: right; color: #8b949e; }
+    td.email { text-align: left; min-width: 240px; color: #8b949e; }
+    td.model { text-align: left; color: #79c0ff; }
+    td.cost { color: #a5d6ff; }
+    td.user-total { color: #3fb950; font-weight: 600; }
+    tfoot td { padding: 8px 12px; text-align: right; border-top: 2px solid #30363d; color: #c9d1d9; font-weight: 600; background: #161b22; }
+    tfoot td:first-child { text-align: left; }
+    .empty { padding: 40px; text-align: center; color: #8b949e; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bedrock Usage</h1>
+    <div class="controls">
+      <select id="daySelect" onchange="changeDays(this.value)">
+        <option value="0">Today</option>
+        <option value="1">Yesterday</option>
+        <option value="2">2 days ago</option>
+        <option value="3">3 days ago</option>
+        <option value="7">7 days ago</option>
+      </select>
+      <span id="badge" class="badge live">● live</span>
+    </div>
+    <div class="meta" id="meta">Loading…</div>
+  </header>
+  <div id="content"><div class="empty">Loading…</div></div>
+
+  <script>
+    let prevDays = 0;
+    let timer = null;
+    const REFRESH_MS = 30000;
+
+    function changeDays(val) {
+      prevDays = parseInt(val, 10);
+      clearInterval(timer);
+      load();
+      if (prevDays === 0) timer = setInterval(load, REFRESH_MS);
+    }
+
+    function fmt(n) { return n.toLocaleString(); }
+    function fmtCost(n) { return '$' + n.toFixed(4); }
+
+    async function load() {
+      const badge = document.getElementById('badge');
+      badge.innerHTML = prevDays === 0 ? '<span class="spinner"></span> live' : '● hist';
+      badge.className = 'badge ' + (prevDays === 0 ? 'live' : 'hist');
+
+      try {
+        const res = await fetch('/api/usage?prev_days=' + prevDays);
+        const data = await res.json();
+        document.getElementById('meta').textContent =
+          data.date_label + (prevDays === 0 ? ' from midnight UTC' : ' full day UTC') +
+          '  |  queried at ' + data.queried_at;
+
+        if (data.error) {
+          document.getElementById('content').innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+          return;
+        }
+        if (!data.rows || data.rows.length === 0) {
+          document.getElementById('content').innerHTML = '<div class="empty">No invocations on ' + data.date_label + '.</div>';
+          return;
+        }
+
+        let html = '<table><thead><tr>' +
+          '<th>User</th><th>Model</th><th>Calls</th>' +
+          '<th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th>' +
+          '<th>Cost</th><th>User Total</th>' +
+          '</tr></thead><tbody>';
+
+        let prevEmail = null;
+        let totCalls = 0, totInp = 0, totOut = 0, totCr = 0, totCw = 0, totCost = 0;
+
+        data.rows.forEach(r => {
+          const isFirst = r.email !== prevEmail;
+          html += '<tr class="' + (isFirst ? 'user-first' : '') + '">';
+          html += '<td class="email">' + (isFirst ? r.email : '') + '</td>';
+          html += '<td class="model">' + r.model + '</td>';
+          html += '<td>' + fmt(r.calls) + '</td>';
+          html += '<td>' + fmt(r.input_tokens) + '</td>';
+          html += '<td>' + fmt(r.output_tokens) + '</td>';
+          html += '<td>' + fmt(r.cache_read) + '</td>';
+          html += '<td>' + fmt(r.cache_write) + '</td>';
+          html += '<td class="cost">' + fmtCost(r.cost) + '</td>';
+          html += '<td class="user-total">' + (isFirst ? fmtCost(r.user_total) : '') + '</td>';
+          html += '</tr>';
+          prevEmail = r.email;
+          totCalls += r.calls;
+          totInp += r.input_tokens;
+          totOut += r.output_tokens;
+          totCr += r.cache_read;
+          totCw += r.cache_write;
+          totCost += r.cost;
+        });
+
+        html += '</tbody><tfoot><tr>' +
+          '<td>TOTAL</td><td></td><td>' + fmt(totCalls) + '</td>' +
+          '<td>' + fmt(totInp) + '</td><td>' + fmt(totOut) + '</td>' +
+          '<td>' + fmt(totCr) + '</td><td>' + fmt(totCw) + '</td>' +
+          '<td class="cost">' + fmtCost(totCost) + '</td><td></td>' +
+          '</tr></tfoot></table>';
+
+        document.getElementById('content').innerHTML = html;
+      } catch (e) {
+        document.getElementById('content').innerHTML = '<div class="error">Failed to fetch: ' + e.message + '</div>';
+      }
+
+      badge.innerHTML = prevDays === 0 ? '● live' : '● hist';
+    }
+
+    load();
+    if (prevDays === 0) timer = setInterval(load, REFRESH_MS);
+  </script>
+</body>
+</html>

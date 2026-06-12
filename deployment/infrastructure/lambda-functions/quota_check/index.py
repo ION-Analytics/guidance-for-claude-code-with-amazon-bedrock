@@ -90,6 +90,7 @@ def lambda_handler(event, context):
                 "usage": None,
                 "policy": None,
                 "unblock_status": None,
+                "allowed_models": None,
                 "message": "No quota policy configured - unlimited access"
             })
 
@@ -106,6 +107,7 @@ def lambda_handler(event, context):
                     "identifier": policy.get("identifier")
                 },
                 "unblock_status": unblock_status,
+                "allowed_models": policy.get("allowed_models"),
                 "message": f"Access granted - temporarily unblocked until {unblock_status.get('expires_at')}"
             })
 
@@ -128,6 +130,7 @@ def lambda_handler(event, context):
                     "identifier": policy.get("identifier")
                 },
                 "unblock_status": {"is_unblocked": False},
+                "allowed_models": policy.get("allowed_models"),
                 "message": "Access granted - enforcement mode is alert-only"
             })
 
@@ -216,6 +219,7 @@ def lambda_handler(event, context):
                 "identifier": policy.get("identifier")
             },
             "unblock_status": {"is_unblocked": False},
+            "allowed_models": policy.get("allowed_models"),
             "message": "Access granted - within quota limits"
         })
 
@@ -369,6 +373,7 @@ def get_policy(policy_type: str, identifier: str) -> dict | None:
             "enforcement_mode": item.get("enforcement_mode", "alert"),
             "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
             "enabled": item.get("enabled", True),
+            "allowed_models": list(item["allowed_models"]) if item.get("allowed_models") else None,
         }
     except Exception as e:
         print(f"Error getting policy {policy_type}:{identifier}: {e}")

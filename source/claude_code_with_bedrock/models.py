@@ -979,6 +979,10 @@ class QuotaPolicy:
     # Enforcement (Phase 1: alert only, Phase 2: block support)
     enforcement_mode: EnforcementMode = EnforcementMode.ALERT
 
+    # Model access restriction — if set, session policy limits invocations to these model ID prefixes
+    # e.g. ["eu.anthropic.claude-haiku-*", "eu.anthropic.claude-sonnet-*"]
+    allowed_models: list[str] | None = None
+
     # Metadata
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -1014,6 +1018,9 @@ class QuotaPolicy:
         if self.daily_cost_limit is not None:
             item["daily_cost_limit"] = Decimal(str(round(self.daily_cost_limit, 4)))
 
+        if self.allowed_models is not None:
+            item["allowed_models"] = self.allowed_models
+
         if self.created_at:
             item["created_at"] = self.created_at.isoformat()
 
@@ -1039,6 +1046,7 @@ class QuotaPolicy:
             warning_threshold_90=int(item.get("warning_threshold_90", 0)),
             enforcement_mode=EnforcementMode(item.get("enforcement_mode", "alert")),
             enabled=item.get("enabled", True),
+            allowed_models=list(item["allowed_models"]) if item.get("allowed_models") else None,
             created_at=datetime.fromisoformat(item["created_at"]) if item.get("created_at") else None,
             updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else None,
             created_by=item.get("created_by"),

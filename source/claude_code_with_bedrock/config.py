@@ -72,6 +72,11 @@ class Profile:
     daily_cost_limit: float | None = None  # Daily cost limit in USD (None = use token limit)
     enable_finegrained_quotas: bool = False  # Enable fine-grained quota policies (user/group/default)
     enable_bypass_detection: bool = False  # Alert when user has Bedrock usage but no CollectorHeartbeat
+    enable_usage_dashboard: bool = False  # Deploy internal Fargate usage dashboard
+    usage_dashboard_vpc_id: str | None = None  # VPC for the dashboard ALB + Fargate task
+    usage_dashboard_subnet_ids: str | None = None  # Comma-separated subnet IDs
+    usage_dashboard_certificate_arn: str | None = None  # ACM cert ARN for HTTPS listener
+    usage_dashboard_url: str | None = None  # Saved from CF output after deploy
     quota_policies_table: str | None = None  # DynamoDB table name for quota policies
     user_quota_metrics_table: str | None = None  # DynamoDB table name for user quota metrics
     quota_api_endpoint: str | None = None  # API Gateway endpoint for real-time quota checks

@@ -28,6 +28,13 @@ from claude_code_with_bedrock.quota_policies import (
 # Security: Maximum allowed unblock duration in days
 MAX_UNBLOCK_DAYS = 7
 
+# Convenience aliases for --allowed-models
+MODEL_ALIASES = {
+    "haiku":  "*anthropic.claude-haiku*",
+    "sonnet": "*anthropic.claude-sonnet*",
+    "opus":   "*anthropic.claude-opus*",
+}
+
 # Email validation pattern (RFC 5322 simplified)
 EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 MAX_EMAIL_LENGTH = 254
@@ -59,6 +66,23 @@ def _get_caller_identity() -> str:
         return identity.get("Arn", "unknown")
     except Exception:
         return "unknown"
+
+
+def _parse_allowed_models(value: str) -> list[str]:
+    """Parse --allowed-models option into a list of model ID patterns.
+
+    Accepts comma-separated values; each item may be a glob pattern or a short
+    alias (haiku, sonnet, opus) which expands to a wildcard prefix.
+
+    Example: "haiku,sonnet" -> ["*.claude-haiku*", "*.claude-sonnet*"]
+    """
+    result = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        result.append(MODEL_ALIASES.get(part.lower(), part))
+    return result
 
 
 def _get_quota_manager(profile) -> QuotaPolicyManager:
@@ -145,6 +169,7 @@ class QuotaSetUserCommand(Command):
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
         option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
+        option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet or eu.anthropic.claude-haiku*). Omit to allow all models.", flag=False),
     ]
 
     def handle(self) -> int:
@@ -217,6 +242,11 @@ class QuotaSetUserCommand(Command):
 
         enabled = not self.option("disabled")
 
+        allowed_models = None
+        allowed_models_str = self.option("allowed-models")
+        if allowed_models_str:
+            allowed_models = _parse_allowed_models(allowed_models_str)
+
         try:
             manager = _get_quota_manager(profile)
             policy = manager.create_policy(
@@ -228,6 +258,7 @@ class QuotaSetUserCommand(Command):
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
                 enabled=enabled,
+                allowed_models=allowed_models,
             )
             console.print(f"[green]Created user quota policy for {email}[/green]")
             console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -238,6 +269,8 @@ class QuotaSetUserCommand(Command):
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
             console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            if policy.allowed_models:
+                console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
 
         except PolicyAlreadyExistsError:
@@ -252,6 +285,7 @@ class QuotaSetUserCommand(Command):
                     daily_cost_limit=daily_cost_limit,
                     enforcement_mode=enforcement_mode,
                     enabled=enabled,
+                    allowed_models=allowed_models,
                 )
                 console.print(f"[yellow]Updated existing user quota policy for {email}[/yellow]")
                 console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -262,6 +296,8 @@ class QuotaSetUserCommand(Command):
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
                 console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                if policy.allowed_models:
+                    console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
             except QuotaPolicyError as e:
                 console.print(f"[red]Failed to update policy: {e}[/red]")
@@ -290,6 +326,7 @@ class QuotaSetGroupCommand(Command):
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
         option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
+        option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet). Omit to allow all models.", flag=False),
     ]
 
     def handle(self) -> int:
@@ -356,6 +393,11 @@ class QuotaSetGroupCommand(Command):
 
         enabled = not self.option("disabled")
 
+        allowed_models = None
+        allowed_models_str = self.option("allowed-models")
+        if allowed_models_str:
+            allowed_models = _parse_allowed_models(allowed_models_str)
+
         try:
             manager = _get_quota_manager(profile)
             policy = manager.create_policy(
@@ -367,6 +409,7 @@ class QuotaSetGroupCommand(Command):
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
                 enabled=enabled,
+                allowed_models=allowed_models,
             )
             console.print(f"[green]Created group quota policy for '{group}'[/green]")
             console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -377,6 +420,8 @@ class QuotaSetGroupCommand(Command):
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
             console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            if policy.allowed_models:
+                console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
 
         except PolicyAlreadyExistsError:
@@ -391,6 +436,7 @@ class QuotaSetGroupCommand(Command):
                     daily_cost_limit=daily_cost_limit,
                     enforcement_mode=enforcement_mode,
                     enabled=enabled,
+                    allowed_models=allowed_models,
                 )
                 console.print(f"[yellow]Updated existing group quota policy for '{group}'[/yellow]")
                 console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -401,6 +447,8 @@ class QuotaSetGroupCommand(Command):
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
                 console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                if policy.allowed_models:
+                    console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
             except QuotaPolicyError as e:
                 console.print(f"[red]Failed to update policy: {e}[/red]")
@@ -425,6 +473,7 @@ class QuotaSetDefaultCommand(Command):
         option("daily-cost-limit", description="Daily cost limit in USD (e.g., 5.00)", flag=False),
         option("enforcement", "e", description="Enforcement mode: 'alert' (default) or 'block'", flag=False),
         option("disabled", description="Create policy in disabled state", flag=True),
+        option("allowed-models", description="Comma-separated model patterns (e.g. haiku,sonnet). Omit to allow all models.", flag=False),
     ]
 
     def handle(self) -> int:
@@ -490,6 +539,11 @@ class QuotaSetDefaultCommand(Command):
 
         enabled = not self.option("disabled")
 
+        allowed_models = None
+        allowed_models_str = self.option("allowed-models")
+        if allowed_models_str:
+            allowed_models = _parse_allowed_models(allowed_models_str)
+
         try:
             manager = _get_quota_manager(profile)
             policy = manager.create_policy(
@@ -501,6 +555,7 @@ class QuotaSetDefaultCommand(Command):
                 daily_cost_limit=daily_cost_limit,
                 enforcement_mode=enforcement_mode,
                 enabled=enabled,
+                allowed_models=allowed_models,
             )
             console.print("[green]Created default quota policy[/green]")
             console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -511,6 +566,8 @@ class QuotaSetDefaultCommand(Command):
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
             console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+            if policy.allowed_models:
+                console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
             return 0
 
         except PolicyAlreadyExistsError:
@@ -525,6 +582,7 @@ class QuotaSetDefaultCommand(Command):
                     daily_cost_limit=daily_cost_limit,
                     enforcement_mode=enforcement_mode,
                     enabled=enabled,
+                    allowed_models=allowed_models,
                 )
                 console.print("[yellow]Updated existing default quota policy[/yellow]")
                 console.print(f"  Monthly limit: {_format_tokens(policy.monthly_token_limit)}")
@@ -535,6 +593,8 @@ class QuotaSetDefaultCommand(Command):
                 if policy.daily_cost_limit is not None:
                     console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
                 console.print(f"  Enforcement: {policy.enforcement_mode.value}")
+                if policy.allowed_models:
+                    console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
                 return 0
             except QuotaPolicyError as e:
                 console.print(f"[red]Failed to update policy: {e}[/red]")

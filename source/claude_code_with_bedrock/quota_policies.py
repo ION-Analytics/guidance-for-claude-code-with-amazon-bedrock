@@ -122,6 +122,7 @@ class QuotaPolicyManager:
         enforcement_mode: EnforcementMode = EnforcementMode.ALERT,
         enabled: bool = True,
         created_by: str | None = None,
+        allowed_models: list[str] | None = None,
     ) -> QuotaPolicy:
         """Create a new quota policy.
 
@@ -167,6 +168,7 @@ class QuotaPolicyManager:
             warning_threshold_90=warning_threshold_90,
             enforcement_mode=enforcement_mode,
             enabled=enabled,
+            allowed_models=allowed_models,
             created_at=now,
             updated_at=now,
             created_by=created_by,
@@ -227,6 +229,7 @@ class QuotaPolicyManager:
         warning_threshold_90: int | None = None,
         enforcement_mode: EnforcementMode | None = None,
         enabled: bool | None = None,
+        allowed_models: list[str] | None = None,
     ) -> QuotaPolicy:
         """Update an existing policy.
 
@@ -304,6 +307,10 @@ class QuotaPolicyManager:
             update_parts.append("#enabled = :enabled")
             expression_values[":enabled"] = enabled
             expression_names["#enabled"] = "enabled"
+
+        if allowed_models is not None:
+            update_parts.append("allowed_models = :allowed_models")
+            expression_values[":allowed_models"] = allowed_models
 
         pk = self._make_pk(policy_type, identifier)
 

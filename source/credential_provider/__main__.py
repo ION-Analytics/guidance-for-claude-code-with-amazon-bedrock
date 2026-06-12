@@ -1189,6 +1189,15 @@ class MultiProviderAuth:
                 "DurationSeconds": self.config.get("max_session_duration", 43200),  # 12 hours
             }
 
+            # Inject model allowlist as a session policy if the quota check returned one
+            # Inject model allowlist as a session policy if the quota check returned one
+            allowed_models = self._last_quota_result.get("allowed_models") if hasattr(self, "_last_quota_result") and self._last_quota_result else None
+            if allowed_models:
+                session_policy = self._build_model_session_policy(allowed_models)
+                if session_policy:
+                    assume_role_params["Policy"] = session_policy
+                    self._debug_print(f"Injecting model session policy for {len(allowed_models)} allowed model(s)")
+
             response = sts_client.assume_role_with_web_identity(**assume_role_params)
 
             # Extract credentials
@@ -1580,6 +1589,7 @@ class MultiProviderAuth:
             if response.status_code == 200:
                 result = response.json()
                 self._debug_print(f"Quota check result: allowed={result.get('allowed')}, reason={result.get('reason')}")
+                self._last_quota_result = result
                 return result
             elif response.status_code == 401:
                 # JWT validation failed at API Gateway
@@ -1631,6 +1641,58 @@ class MultiProviderAuth:
                     "message": f"Quota check failed: {e}"
                 }
             return {"allowed": True, "reason": "error"}
+
+    def _build_model_session_policy(self, allowed_models: list) -> str | None:
+        """Build an IAM session policy that restricts Bedrock invocations to the allowed model list.
+
+        IAM StringNotLike with a list uses OR semantics, so "deny if not like A OR not like B"
+        always fires for multi-model allowlists. Instead, we compute the denied families from the
+        known set and use StringLike to explicitly deny those patterns.
+
+        Returns JSON string, or None if the policy would exceed the 2048-char STS limit.
+        """
+        import json as _json
+
+        # IAM condition keys don't work reliably for bedrock:ModelId
+        # Use Resource ARN deny instead: arn:aws:bedrock:*:*:inference-profile/*{family}*
+        all_families = {"*anthropic.claude-haiku*", "*anthropic.claude-sonnet*", "*anthropic.claude-opus*"}
+        denied_patterns = sorted(all_families - set(allowed_models))
+
+        if not denied_patterns:
+            # All known families are allowed — no restriction needed
+            return None
+
+        # Simplify patterns: *anthropic.claude-opus* → *opus* (matches both ARN and bare ID)
+        simple_denied = [p.replace("anthropic.claude-", "") for p in denied_patterns]
+
+        # Build Resource ARNs: arn:aws:bedrock:*:*:inference-profile/*opus*
+        denied_arns = [f"arn:aws:bedrock:*:*:inference-profile/{p}" for p in simple_denied]
+
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "AllowAll",
+                    "Effect": "Allow",
+                    "Action": "*",
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "DenyDisallowedModels",
+                    "Effect": "Deny",
+                    "Action": [
+                        "bedrock:InvokeModel",
+                        "bedrock:InvokeModelWithResponseStream",
+                    ],
+                    "Resource": denied_arns,
+                },
+            ],
+        }
+        policy_str = _json.dumps(policy, separators=(",", ":"))
+        if len(policy_str) > 2048:
+            self._debug_print(f"Model session policy too large ({len(policy_str)} chars), skipping")
+            return None
+        return policy_str
 
     def _handle_quota_blocked(self, quota_result: dict) -> int:
         """Handle blocked quota by displaying user-friendly message.
@@ -2154,18 +2216,20 @@ class MultiProviderAuth:
                 return 0
 
             # Try silent refresh using cached id_token before opening browser
+            # Check quota BEFORE refresh so _last_quota_result is set when
+            # get_aws_credentials_direct() builds the session policy.
+            id_token_for_quota = self.get_monitoring_token()
+            if id_token_for_quota and self._should_check_quota():
+                token_claims_for_quota = jwt.decode(id_token_for_quota, options={"verify_signature": False})
+                quota_result = self._check_quota(token_claims_for_quota, id_token_for_quota)
+                self._save_quota_check_timestamp()
+                if not quota_result.get("allowed", True):
+                    return self._handle_quota_blocked(quota_result)
+                else:
+                    self._handle_quota_warning(quota_result)
+
             silent_creds, id_token, token_claims = self._try_silent_refresh()
             if silent_creds:
-                # Check quota if configured (reuse token/claims already fetched above)
-                if self._should_check_quota():
-                    if id_token and token_claims:
-                        quota_result = self._check_quota(token_claims, id_token)
-                        self._save_quota_check_timestamp()
-                        if not quota_result.get("allowed", True):
-                            return self._handle_quota_blocked(quota_result)
-                        else:
-                            self._handle_quota_warning(quota_result)
-
                 print(json.dumps(silent_creds))
                 return 0
 

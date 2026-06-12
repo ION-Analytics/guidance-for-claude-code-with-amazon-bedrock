@@ -68,6 +68,39 @@ Parameters:
       - 'false'
     Description: Alert when a user has Bedrock usage but no CollectorHeartbeat in the same window (indicates otelcol sidecar not running)
 
+  EnableUsageDashboard:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Deploy the internal Bedrock usage dashboard (Fargate + internal ALB)
+
+  UsageDashboardImage:
+    Type: String
+    Default: ''
+    Description: ECR image URI for the usage dashboard container (required when EnableUsageDashboard=true)
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC ID for the usage dashboard ALB and Fargate task
+
+  SubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated private subnet IDs for the Fargate task
+
+  AlbSubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated subnet IDs for the internal ALB (can be same as SubnetIds)
+
+  UsageDashboardCertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate ARN for HTTPS on the usage dashboard ALB
+
   # JWT Authentication Parameters for Quota Check API
   OidcIssuerUrl:
     Type: String
@@ -76,6 +109,9 @@ Parameters:
   OidcClientId:
     Type: String
     Description: OIDC client ID (audience) for JWT validation
+
+Conditions:
+  UsageDashboardEnabled: !Equals [!Ref EnableUsageDashboard, 'true']
 
 Resources:
   # DynamoDB table for quota policies (user, group, default levels)
@@ -380,6 +416,186 @@ Resources:
   # End Quota Check API
   # ============================================
 
+  # ============================================
+  # Usage Dashboard (Fargate + internal ALB)
+  # ============================================
+
+  UsageDashboardCluster:
+    Type: AWS::ECS::Cluster
+    Condition: UsageDashboardEnabled
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-usage-dashboard'
+
+  UsageDashboardTaskRole:
+    Type: AWS::IAM::Role
+    Condition: UsageDashboardEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: UsageDashboardPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - logs:StopQuery
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:bedrock-model-invocation:*'
+
+  UsageDashboardExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: UsageDashboardEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  UsageDashboardLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UsageDashboardEnabled
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}-usage-dashboard'
+      RetentionInDays: 14
+
+  UsageDashboardTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Condition: UsageDashboardEnabled
+    Properties:
+      Family: !Sub '${AWS::StackName}-usage-dashboard'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !GetAtt UsageDashboardTaskRole.Arn
+      ExecutionRoleArn: !GetAtt UsageDashboardExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: usage-dashboard
+          Image: !Ref UsageDashboardImage
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref 'AWS::Region'
+            - Name: INVOCATION_LOG_GROUP
+              Value: bedrock-model-invocation
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UsageDashboardLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: dashboard
+
+  UsageDashboardAlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UsageDashboardEnabled
+    Properties:
+      GroupDescription: Usage dashboard internal ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-alb-sg'
+
+  UsageDashboardTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UsageDashboardEnabled
+    Properties:
+      GroupDescription: Usage dashboard Fargate task
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref UsageDashboardAlbSg
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-task-sg'
+
+  UsageDashboardAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: UsageDashboardEnabled
+    Properties:
+      Name: !Sub '${AWS::StackName}-dashboard'
+      Scheme: internal
+      Type: application
+      Subnets: !Split [',', !Ref AlbSubnetIds]
+      SecurityGroups:
+        - !Ref UsageDashboardAlbSg
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-usage-dashboard'
+
+  UsageDashboardTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: UsageDashboardEnabled
+    Properties:
+      Name: cc-usage-dashboard-tg
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  UsageDashboardListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UsageDashboardEnabled
+    Properties:
+      LoadBalancerArn: !Ref UsageDashboardAlb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref UsageDashboardCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UsageDashboardTargetGroup
+
+  UsageDashboardService:
+    Type: AWS::ECS::Service
+    Condition: UsageDashboardEnabled
+    DependsOn: UsageDashboardListener
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-usage-dashboard'
+      Cluster: !Ref UsageDashboardCluster
+      TaskDefinition: !Ref UsageDashboardTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Split [',', !Ref SubnetIds]
+          SecurityGroups:
+            - !Ref UsageDashboardTaskSg
+      LoadBalancers:
+        - ContainerName: usage-dashboard
+          ContainerPort: 8080
+          TargetGroupArn: !Ref UsageDashboardTargetGroup
+
+  # ============================================
+  # End Usage Dashboard
+  # ============================================
+
 Outputs:
   QuotaTableName:
     Description: Name of the UserQuotaMetrics DynamoDB table
@@ -428,3 +644,10 @@ Outputs:
     Value: !GetAtt QuotaCheckFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-QuotaCheckFunctionArn'
+
+  UsageDashboardUrl:
+    Condition: UsageDashboardEnabled
+    Description: Internal ALB URL for the Bedrock usage dashboard
+    Value: !Sub 'https://${UsageDashboardAlb.DNSName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-UsageDashboardUrl'

@@ -788,6 +788,43 @@ class DeployCommand(Command):
                 # default is 'false' to match the opt-in intent of this field.
                 enable_finegrained_quotas = profile.enable_finegrained_quotas
 
+                # Resolve VPC/subnet info for usage dashboard (reuse networking stack outputs)
+                enable_dashboard = getattr(profile, "enable_usage_dashboard", False)
+                dashboard_image_uri = ""
+                vpc_id = ""
+                subnet_ids = ""
+
+                if enable_dashboard:
+                    # Explicit dashboard VPC fields take precedence over networking stack
+                    vpc_id = getattr(profile, "usage_dashboard_vpc_id", None) or ""
+                    subnet_ids = getattr(profile, "usage_dashboard_subnet_ids", None) or ""
+
+                    if not vpc_id or not subnet_ids:
+                        # Fall back to networking stack outputs
+                        networking_stack = profile.stack_names.get(
+                            "networking", f"{profile.identity_pool_name}-networking"
+                        )
+                        networking_outputs = get_stack_outputs(networking_stack, profile.aws_region)
+                        if networking_outputs:
+                            vpc_id = networking_outputs.get("VpcId", "")
+                            subnet_ids = networking_outputs.get("SubnetIds", "")
+
+                    if not vpc_id or not subnet_ids:
+                        console.print(
+                            "[red]Usage dashboard requires VPC/subnet IDs.[/red]\n"
+                            "[yellow]Add to your profile:[/yellow]\n"
+                            '  [cyan]"usage_dashboard_vpc_id": "vpc-xxxx"[/cyan]\n'
+                            '  [cyan]"usage_dashboard_subnet_ids": "subnet-aaaa,subnet-bbbb"[/cyan]'
+                        )
+                        return 1
+
+                    # Build and push usage dashboard image to ECR
+                    dashboard_image_uri = self._build_push_usage_dashboard(
+                        profile, project_root, console
+                    )
+                    if not dashboard_image_uri:
+                        return 1
+
                 params = [
                     f"MonthlyTokenLimit={monthly_limit}",
                     f"WarningThreshold80={warning_80}",
@@ -801,6 +838,12 @@ class DeployCommand(Command):
                     f"EnableBypassDetection={str(getattr(profile, 'enable_bypass_detection', False)).lower()}",
                     f"MonthlyCostLimit={monthly_cost_limit or ''}",
                     f"DailyCostLimit={daily_cost_limit or ''}",
+                    f"EnableUsageDashboard={str(enable_dashboard).lower()}",
+                    f"UsageDashboardImage={dashboard_image_uri}",
+                    f"VpcId={vpc_id}",
+                    f"SubnetIds={subnet_ids}",
+                    f"AlbSubnetIds={subnet_ids}",
+                    f"UsageDashboardCertificateArn={getattr(profile, 'usage_dashboard_certificate_arn', '') or ''}",
                 ]
 
                 # Package the template using AWS CLI
@@ -1167,6 +1210,9 @@ class DeployCommand(Command):
                         profile.quota_policies_table = quota_outputs["PoliciesTableName"]
                     if quota_outputs.get("QuotaTableName"):
                         profile.user_quota_metrics_table = quota_outputs["QuotaTableName"]
+                    if quota_outputs.get("UsageDashboardUrl"):
+                        profile.usage_dashboard_url = quota_outputs["UsageDashboardUrl"]
+                        console.print(f"• Usage Dashboard: [cyan]{profile.usage_dashboard_url}[/cyan]")
                     config.save_profile(profile)
 
     def _check_orphaned_stacks(self, stacks_to_deploy, profile, cf_manager, console: Console) -> list:
@@ -1203,6 +1249,68 @@ class DeployCommand(Command):
                     orphaned.append((stack_type, stack_name, status))
 
         return orphaned
+
+    def _build_push_usage_dashboard(self, profile, project_root: Path, console: Console) -> str:
+        """Build the usage dashboard Docker image and push it to ECR. Returns the image URI."""
+        import boto3
+        from datetime import datetime
+
+        region = profile.aws_region
+        account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+        repo_name = f"{profile.identity_pool_name}-usage-dashboard"
+        registry = f"{account_id}.dkr.ecr.{region}.amazonaws.com"
+        tag = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        image_uri = f"{registry}/{repo_name}:{tag}"
+
+        ecr = boto3.client("ecr", region_name=region)
+
+        # Create ECR repo if it doesn't exist
+        try:
+            ecr.create_repository(repositoryName=repo_name)
+            console.print(f"[dim]Created ECR repository: {repo_name}[/dim]")
+        except ecr.exceptions.RepositoryAlreadyExistsException:
+            pass
+
+        dashboard_dir = project_root / "deployment" / "infrastructure" / "usage-dashboard"
+
+        # Authenticate Docker to ECR
+        token = ecr.get_authorization_token()["authorizationData"][0]
+        import base64
+        username, password = base64.b64decode(token["authorizationToken"]).decode().split(":", 1)
+
+        console.print("[dim]Logging in to ECR...[/dim]")
+        login = subprocess.run(
+            ["docker", "login", "--username", username, "--password-stdin", registry],
+            input=password,
+            capture_output=True,
+            text=True,
+        )
+        if login.returncode != 0:
+            console.print(f"[red]Docker login failed: {login.stderr}[/red]")
+            return ""
+
+        console.print("[dim]Building usage dashboard image...[/dim]")
+        build = subprocess.run(
+            ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, str(dashboard_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if build.returncode != 0:
+            console.print(f"[red]Docker build failed:\n{build.stderr}[/red]")
+            return ""
+
+        console.print("[dim]Pushing image to ECR...[/dim]")
+        push = subprocess.run(
+            ["docker", "push", image_uri],
+            capture_output=True,
+            text=True,
+        )
+        if push.returncode != 0:
+            console.print(f"[red]Docker push failed:\n{push.stderr}[/red]")
+            return ""
+
+        console.print(f"[green]✓ Usage dashboard image pushed: {image_uri}[/green]")
+        return image_uri
 
     def _ensure_ecs_service_linked_role(self, console: Console) -> None:
         """Ensure ECS service linked role exists, create if needed."""
