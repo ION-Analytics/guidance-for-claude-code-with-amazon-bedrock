@@ -165,7 +165,7 @@ Resources:
     Properties:
       RoleName: !Ref FederatedRoleName
       Description: Direct IAM role for OIDC users accessing Bedrock
-      MaxSessionDuration: 43200  # 12 hours
+      MaxSessionDuration: 14400  # 4 hours
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
