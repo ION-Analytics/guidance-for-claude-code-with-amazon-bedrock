@@ -453,6 +453,13 @@ Resources:
                   - cloudwatch:ListMetrics
                   - cloudwatch:GetMetricData
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt UserQuotaMetrics.Arn
+                  - !GetAtt QuotaPolicies.Arn
 
   UsageDashboardExecutionRole:
     Type: AWS::IAM::Role
@@ -498,6 +505,10 @@ Resources:
               Value: !Ref 'AWS::Region'
             - Name: INVOCATION_LOG_GROUP
               Value: bedrock-model-invocation
+            - Name: USER_METRICS_TABLE
+              Value: !Ref UserQuotaMetrics
+            - Name: QUOTA_POLICIES_TABLE
+              Value: !Ref QuotaPolicies
           LogConfiguration:
             LogDriver: awslogs
             Options:

@@ -281,7 +281,7 @@ class QuotaSetUserCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.monthly_enforcement_mode.value}")
             console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
@@ -448,7 +448,7 @@ class QuotaSetGroupCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.monthly_enforcement_mode.value}")
             console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
@@ -610,7 +610,7 @@ class QuotaSetDefaultCommand(Command):
                 console.print(f"  Monthly cost limit: ${policy.monthly_cost_limit:.2f}")
             if policy.daily_cost_limit is not None:
                 console.print(f"  Daily cost limit: ${policy.daily_cost_limit:.2f}")
-            console.print(f"  Monthly enforcement: {policy.enforcement_mode.value}")
+            console.print(f"  Monthly enforcement: {policy.monthly_enforcement_mode.value}")
             console.print(f"  Daily enforcement: {policy.daily_enforcement_mode.value}")
             if policy.allowed_models:
                 console.print(f"  Allowed models: {', '.join(policy.allowed_models)}")
@@ -786,7 +786,7 @@ class QuotaListCommand(Command):
                 daily = _format_tokens(policy.daily_token_limit) if policy.daily_token_limit else "-"
                 monthly_cost = f"${policy.monthly_cost_limit:.2f}" if policy.monthly_cost_limit is not None else "-"
                 daily_cost = f"${policy.daily_cost_limit:.2f}" if policy.daily_cost_limit is not None else "-"
-                enforcement = "[red]block[/red]" if policy.enforcement_mode.value == "block" else "alert"
+                enforcement = "[red]block[/red]" if policy.monthly_enforcement_mode.value == "block" else "alert"
 
                 table.add_row(
                     policy.policy_type.value,

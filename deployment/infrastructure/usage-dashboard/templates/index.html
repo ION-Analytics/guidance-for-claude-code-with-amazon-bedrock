@@ -35,6 +35,13 @@
     .hb-dot.red   { background: #f85149; }
     .hb-dot.grey  { background: #484f58; }
     .hb-dot[title] { cursor: default; }
+    .quota-row td { padding: 2px 12px 6px; border-bottom: none; }
+    .quota-status { font-size: 11px; color: #8b949e; display: inline-flex; gap: 10px; }
+    .q-seg { font-weight: 500; }
+    .q-seg.q-green { color: #3fb950; }
+    .q-seg.q-yellow { color: #e3b341; }
+    .q-seg.q-red { color: #f85149; }
+    .q-policy { font-size: 10px; color: #ffffff; font-weight: 400; margin-left: 3px; }
     td.model { text-align: left; color: #79c0ff; }
     td.cost { color: #a5d6ff; }
     td.user-total { color: #3fb950; font-weight: 600; }
@@ -65,6 +72,7 @@
     let timer = null;
     const REFRESH_MS = 30000;
     let heartbeats = {};  // {email: {cw: bool, otlp: bool}}
+    let quotas = {};      // {email: {daily_pct, daily_label, daily_enforcement, monthly_pct, monthly_label, monthly_enforcement}}
 
     function changeDays(val) {
       prevDays = parseInt(val, 10);
@@ -100,17 +108,62 @@
       } catch (_) { /* non-fatal */ }
     }
 
+    async function loadQuotas() {
+      try {
+        const res = await fetch('/api/quotas');
+        if (res.ok) quotas = await res.json();
+      } catch (_) { /* non-fatal */ }
+    }
+
+    function qColourClass(pct) {
+      if (pct === null || pct === undefined) return 'q-green';
+      if (pct > 100) return 'q-red';
+      if (pct >= 80) return 'q-yellow';
+      return 'q-green';
+    }
+
+    function enforcementLabel(mode) {
+      if (!mode) return '';
+      return mode === 'block' ? 'B' : 'A';
+    }
+
+    function quotaStatusHtml(email) {
+      const q = quotas[email];
+      if (!q) return '';
+      const policyTag = '<span class="q-policy">' + (q.policy_source === 'ind' ? 'Ind' : 'Def') + '</span>';
+      const segs = [];
+      if (q.daily_pct !== null && q.daily_pct !== undefined) {
+        const cls = qColourClass(q.daily_pct);
+        const lbl = enforcementLabel(q.daily_enforcement);
+        segs.push('<span class="q-seg ' + cls + '">D ' + q.daily_pct + '% (' + lbl + ')</span>');
+      }
+      if (q.monthly_pct !== null && q.monthly_pct !== undefined) {
+        const cls = qColourClass(q.monthly_pct);
+        const lbl = enforcementLabel(q.monthly_enforcement);
+        segs.push('<span class="q-seg ' + cls + '">M ' + q.monthly_pct + '% (' + lbl + ')</span>');
+      }
+      if (!segs.length) return '';
+      return '<span class="quota-status">' + segs.join('') + policyTag + '</span>';
+    }
+
+    function quotaRow(email, colSpan) {
+      const inner = quotaStatusHtml(email);
+      if (!inner) return '';
+      return '<tr class="quota-row"><td class="email" colspan="' + colSpan + '">' + inner + '</td></tr>';
+    }
+
     async function load() {
       const badge = document.getElementById('badge');
       badge.innerHTML = prevDays === 0 ? '<span class="spinner"></span> live' : '● hist';
       badge.className = 'badge ' + (prevDays === 0 ? 'live' : 'hist');
 
-      // Fetch usage and heartbeats in parallel; heartbeats only meaningful for today
+      // Fetch usage, heartbeats, and quotas in parallel; heartbeats/quotas only for today
       const fetchUsage = fetch('/api/usage?prev_days=' + prevDays).then(r => r.json());
       const fetchHb = prevDays === 0 ? loadHeartbeats() : Promise.resolve();
+      const fetchQuotas = prevDays === 0 ? loadQuotas() : Promise.resolve();
 
       try {
-        const [data] = await Promise.all([fetchUsage, fetchHb]);
+        const [data] = await Promise.all([fetchUsage, fetchHb, fetchQuotas]);
         document.getElementById('meta').textContent =
           data.date_label + (prevDays === 0 ? ' from midnight UTC' : ' full day UTC') +
           '  |  queried at ' + data.queried_at;
@@ -130,14 +183,27 @@
           '<th>Cost</th><th>User Total</th>' +
           '</tr></thead><tbody>';
 
-        let prevEmail = null;
         let totCalls = 0, totInp = 0, totOut = 0, totCr = 0, totCw = 0, totCost = 0;
 
+        // Count rows per user so we know if there are multiple models
+        const rowsPerUser = {};
+        data.rows.forEach(r => { rowsPerUser[r.email] = (rowsPerUser[r.email] || 0) + 1; });
+
+        const userRowIndex = {};  // tracks which row-within-user we're on (0-based)
         data.rows.forEach(r => {
-          const isFirst = r.email !== prevEmail;
-          const emailCell = isFirst
-            ? r.email + (prevDays === 0 ? hbDots(r.email) : '')
-            : '';
+          const idx = userRowIndex[r.email] || 0;
+          userRowIndex[r.email] = idx + 1;
+          const isFirst = idx === 0;
+          const isSecond = idx === 1;
+          const multiModel = rowsPerUser[r.email] > 1;
+
+          let emailCell = '';
+          if (isFirst) {
+            emailCell = r.email + (prevDays === 0 ? hbDots(r.email) : '');
+          } else if (isSecond && multiModel && prevDays === 0) {
+            emailCell = quotaStatusHtml(r.email);
+          }
+
           html += '<tr class="' + (isFirst ? 'user-first' : '') + '">';
           html += '<td class="email">' + emailCell + '</td>';
           html += '<td class="model">' + r.model + '</td>';
@@ -149,7 +215,8 @@
           html += '<td class="cost">' + fmtCost(r.cost) + '</td>';
           html += '<td class="user-total">' + (isFirst ? fmtCost(r.user_total) : '') + '</td>';
           html += '</tr>';
-          prevEmail = r.email;
+          // Only use a dedicated quota row when the user has a single model
+          if (isFirst && !multiModel && prevDays === 0) html += quotaRow(r.email, 9);
           totCalls += r.calls;
           totInp += r.input_tokens;
           totOut += r.output_tokens;

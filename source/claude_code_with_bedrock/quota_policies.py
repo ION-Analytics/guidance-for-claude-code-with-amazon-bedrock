@@ -514,7 +514,7 @@ class QuotaPolicyManager:
             "policy_type": policy.policy_type.value,
             "policy_identifier": policy.identifier,
             "unlimited": False,
-            "enforcement_mode": policy.enforcement_mode.value,
+            "enforcement_mode": policy.monthly_enforcement_mode.value,
             "monthly_tokens": current_monthly_tokens,
             "monthly_token_limit": policy.monthly_token_limit,
             "monthly_token_pct": round(monthly_pct, 1),
@@ -550,7 +550,7 @@ class QuotaPolicyManager:
                 "type": policy.policy_type.value,
                 "identifier": policy.identifier,
                 "monthly_token_limit": _format_tokens(policy.monthly_token_limit),
-                "enforcement_mode": policy.enforcement_mode.value,
+                "enforcement_mode": policy.monthly_enforcement_mode.value,
                 "enabled": policy.enabled,
             }
 
@@ -624,7 +624,7 @@ class QuotaPolicyManager:
                                 identifier=parsed["identifier"],
                                 monthly_token_limit=parsed["monthly_token_limit"],
                                 daily_token_limit=parsed.get("daily_token_limit"),
-                                enforcement_mode=parsed.get("enforcement_mode", EnforcementMode.ALERT),
+                                monthly_enforcement_mode=parsed.get("monthly_enforcement_mode", parsed.get("enforcement_mode", EnforcementMode.ALERT)),
                                 enabled=parsed.get("enabled", True),
                             )
                         results["updated"] += 1
@@ -650,7 +650,7 @@ class QuotaPolicyManager:
                             identifier=parsed["identifier"],
                             monthly_token_limit=parsed["monthly_token_limit"],
                             daily_token_limit=parsed.get("daily_token_limit"),
-                            enforcement_mode=parsed.get("enforcement_mode", EnforcementMode.ALERT),
+                            monthly_enforcement_mode=parsed.get("monthly_enforcement_mode", parsed.get("enforcement_mode", EnforcementMode.ALERT)),
                             enabled=parsed.get("enabled", True),
                         )
                     results["created"] += 1

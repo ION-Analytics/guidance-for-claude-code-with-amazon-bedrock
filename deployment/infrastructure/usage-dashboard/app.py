@@ -2,15 +2,19 @@
 
 import os
 import time
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from boto3.dynamodb.conditions import Key, Attr as DdbAttr
 from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
 
 LOG_GROUP = os.environ.get("INVOCATION_LOG_GROUP", "bedrock-model-invocation")
 REGION = os.environ.get("AWS_REGION", "eu-west-1")
+METRICS_TABLE = os.environ.get("USER_METRICS_TABLE", "UserQuotaMetrics")
+POLICIES_TABLE = os.environ.get("QUOTA_POLICIES_TABLE", "QuotaPolicies")
 
 QUERY = """
 fields identity.arn, modelId,
@@ -85,10 +89,9 @@ def _day_window(prev_days):
     return int(target.timestamp()), int((target + timedelta(days=1)).timestamp()), target.strftime("%Y-%m-%d")
 
 
-def run_query(prev_days=0):
+def _run_cw_query(start_time, end_time):
+    """Run the Bedrock usage CW Logs query and return {email: total_cost}."""
     logs = boto3.client("logs", region_name=REGION)
-    start_time, end_time, date_label = _day_window(prev_days)
-
     response = logs.start_query(
         logGroupName=LOG_GROUP,
         startTime=start_time,
@@ -96,16 +99,14 @@ def run_query(prev_days=0):
         queryString=QUERY,
     )
     query_id = response["queryId"]
-
     for _ in range(60):
         result = logs.get_query_results(queryId=query_id)
         if result["status"] in ("Complete", "Failed", "Cancelled"):
             break
         time.sleep(1)
-
     if result["status"] != "Complete":
-        return None, f"Query {result['status']}", date_label
-
+        return None, None, f"Query {result['status']}"
+    costs = {}
     rows = []
     for row in result.get("results", []):
         f = {item["field"]: item["value"] for item in row}
@@ -118,6 +119,7 @@ def run_query(prev_days=0):
         cache_w = float(f.get("cache_write", 0))
         calls = int(f.get("calls", 0))
         usd = _calc_cost(inp, out, cache_r, cache_w, model_id)
+        costs[email] = costs.get(email, 0.0) + usd
         rows.append({
             "email": email,
             "model": _short_model(model_id),
@@ -128,16 +130,21 @@ def run_query(prev_days=0):
             "cache_write": int(cache_w),
             "cost": round(usd, 4),
         })
+    return costs, rows, None
 
-    user_totals = {}
-    for r in rows:
-        user_totals[r["email"]] = user_totals.get(r["email"], 0.0) + r["cost"]
 
+def run_query(prev_days=0):
+    start_time, end_time, date_label = _day_window(prev_days)
+    costs, rows, err = _run_cw_query(start_time, end_time)
+    if err:
+        return None, err, date_label
+
+    user_totals = costs
     for r in rows:
         r["user_total"] = round(user_totals[r["email"]], 4)
-
     rows.sort(key=lambda x: (-user_totals[x["email"]], x["email"], -x["cost"]))
     return rows, None, date_label
+
 
 
 @app.route("/")
@@ -247,6 +254,106 @@ def heartbeats():
         }
 
     return jsonify(result)
+
+
+@app.route("/api/quotas")
+def quotas():
+    """Return per-user quota status (cost-based only).
+
+    Daily and monthly costs come from DynamoDB UserQuotaMetrics.
+    Limits and enforcement modes come from DynamoDB QuotaPolicies.
+    """
+    ddb = boto3.resource("dynamodb", region_name=REGION)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Usage from DynamoDB — filter to current-month USER# items only to avoid
+    # ALERTS items (which also carry an email attribute) overwriting real values
+    metrics_tbl = ddb.Table(METRICS_TABLE)
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    today_costs, monthly_costs = {}, {}
+    try:
+        scan_kwargs = dict(
+            FilterExpression=DdbAttr("sk").eq(f"MONTH#{current_month}") & DdbAttr("pk").begins_with("USER#"),
+            ProjectionExpression="#em, total_cost, daily_cost, daily_date",
+            ExpressionAttributeNames={"#em": "email"},
+        )
+        resp = metrics_tbl.scan(**scan_kwargs)
+        items = resp.get("Items", [])
+        while "LastEvaluatedKey" in resp:
+            resp = metrics_tbl.scan(**scan_kwargs, ExclusiveStartKey=resp["LastEvaluatedKey"])
+            items += resp.get("Items", [])
+        for item in items:
+            email = str(item.get("email", "")).lower()
+            if not email:
+                continue
+            monthly_costs[email] = float(item.get("total_cost", 0))
+            today_costs[email] = float(item.get("daily_cost", 0)) if str(item.get("daily_date", "")) == today else 0.0
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # Policies from DynamoDB
+    policies_tbl = ddb.Table(POLICIES_TABLE)
+    user_policies, default_policy = {}, None
+    try:
+        resp = policies_tbl.scan()
+        items = resp.get("Items", [])
+        while "LastEvaluatedKey" in resp:
+            resp = policies_tbl.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+            items += resp.get("Items", [])
+        for item in items:
+            pt = item.get("policy_type")
+            ident = str(item.get("identifier", "")).lower()
+            if item.get("enabled") is False:
+                continue
+            p = {
+                "monthly_cost_limit": float(item["monthly_cost_limit"]) if item.get("monthly_cost_limit") else None,
+                "daily_cost_limit": float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
+                "monthly_enforcement": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
+                "daily_enforcement": item.get("daily_enforcement_mode", "alert"),
+            }
+            if pt == "user":
+                user_policies[ident] = p
+            elif pt == "default":
+                default_policy = p
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    def resolve_policy(email):
+        if email in user_policies:
+            return user_policies[email], "ind"
+        return default_policy, "def"
+
+    out = {}
+    all_emails = set(today_costs) | set(monthly_costs)
+    for email in all_emails:
+        policy, policy_source = resolve_policy(email)
+        if not policy:
+            continue
+        result = {"policy_source": policy_source}
+
+        dcl = policy.get("daily_cost_limit") or 0
+        if dcl > 0:
+            dc = today_costs.get(email, 0.0)
+            result["daily_pct"] = round(min((dc / dcl) * 100, 999), 1)
+            result["daily_label"] = f"${dc:.2f}/${dcl:.0f}"
+        else:
+            result["daily_pct"] = None
+            result["daily_label"] = None
+        result["daily_enforcement"] = policy.get("daily_enforcement", "alert")
+
+        mcl = policy.get("monthly_cost_limit") or 0
+        if mcl > 0:
+            mc = monthly_costs.get(email, 0.0)
+            result["monthly_pct"] = round(min((mc / mcl) * 100, 999), 1)
+            result["monthly_label"] = f"${mc:.2f}/${mcl:.0f}"
+        else:
+            result["monthly_pct"] = None
+            result["monthly_label"] = None
+        result["monthly_enforcement"] = policy.get("monthly_enforcement", "alert")
+
+        out[email] = result
+
+    return jsonify(out)
 
 
 if __name__ == "__main__":
