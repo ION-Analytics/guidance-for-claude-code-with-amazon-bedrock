@@ -170,7 +170,7 @@ def update_quota_metrics(usage_data):
             existing = response.get("Item", {})
             daily_reset = existing.get("daily_date") != current_date
 
-            update_expr = "ADD total_tokens :delta, input_tokens :inp, output_tokens :out, cache_tokens :cache, total_cost :cost"
+            update_expr = "ADD total_tokens :delta, input_tokens :inp, output_tokens :out, cache_tokens :cache, cache_write_tokens :cache_write, total_cost :cost"
             if daily_reset:
                 update_expr += " SET daily_tokens = :delta, daily_cost = :cost, daily_date = :date, last_updated = :ts, #ttl = :ttl, email = :email"
             else:
@@ -186,6 +186,7 @@ def update_quota_metrics(usage_data):
                     ":inp": Decimal(str(inp)),
                     ":out": Decimal(str(out)),
                     ":cache": Decimal(str(cache)),
+                    ":cache_write": Decimal(str(cache_write)),
                     ":cost": Decimal(str(round(cost_delta, 6))),
                     ":date": current_date,
                     ":ts": now.isoformat().replace("+00:00", "Z"),
@@ -492,7 +493,8 @@ def load_all_policies():
                     "daily_token_limit": int(item.get("daily_token_limit", 0)) if item.get("daily_token_limit") else None,
                     "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
                     "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
-                    "enforcement_mode": item.get("enforcement_mode", "alert"),
+                    "enforcement_mode": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
+                    "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
                     "enabled": item.get("enabled", True),
                 }
         while "LastEvaluatedKey" in response:
@@ -506,7 +508,8 @@ def load_all_policies():
                         "daily_token_limit": int(item.get("daily_token_limit", 0)) if item.get("daily_token_limit") else None,
                         "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
                         "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
-                        "enforcement_mode": item.get("enforcement_mode", "alert"),
+                        "enforcement_mode": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
+                        "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
                         "enabled": item.get("enabled", True),
                     }
     except Exception as e:
