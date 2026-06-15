@@ -24,6 +24,8 @@ from .commands.init import InitCommand
 from .commands.package import PackageCommand
 from .commands.quota import (
     QuotaDeleteCommand,
+    QuotaDisableCommand,
+    QuotaEnableCommand,
     QuotaExportCommand,
     QuotaImportCommand,
     QuotaListCommand,
@@ -73,6 +75,8 @@ def create_application() -> Application:
     application.add(QuotaSetGroupCommand())
     application.add(QuotaSetDefaultCommand())
     application.add(QuotaListCommand())
+    application.add(QuotaEnableCommand())
+    application.add(QuotaDisableCommand())
     application.add(QuotaDeleteCommand())
     application.add(QuotaShowCommand())
     application.add(QuotaUsageCommand())

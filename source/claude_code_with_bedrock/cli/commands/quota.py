@@ -297,7 +297,8 @@ class QuotaSetUserCommand(Command):
                     daily_token_limit=daily_limit,
                     monthly_cost_limit=monthly_cost_limit,
                     daily_cost_limit=daily_cost_limit,
-                    enforcement_mode=enforcement_mode,
+                    monthly_enforcement_mode=monthly_enforcement_mode,
+                    daily_enforcement_mode=daily_enforcement_mode,
                     enabled=enabled,
                     allowed_models=allowed_models,
                 )
@@ -463,7 +464,8 @@ class QuotaSetGroupCommand(Command):
                     daily_token_limit=daily_limit,
                     monthly_cost_limit=monthly_cost_limit,
                     daily_cost_limit=daily_cost_limit,
-                    enforcement_mode=enforcement_mode,
+                    monthly_enforcement_mode=monthly_enforcement_mode,
+                    daily_enforcement_mode=daily_enforcement_mode,
                     enabled=enabled,
                     allowed_models=allowed_models,
                 )
@@ -624,7 +626,8 @@ class QuotaSetDefaultCommand(Command):
                     daily_token_limit=daily_limit,
                     monthly_cost_limit=monthly_cost_limit,
                     daily_cost_limit=daily_cost_limit,
-                    enforcement_mode=enforcement_mode,
+                    monthly_enforcement_mode=monthly_enforcement_mode,
+                    daily_enforcement_mode=daily_enforcement_mode,
                     enabled=enabled,
                     allowed_models=allowed_models,
                 )
@@ -648,6 +651,78 @@ class QuotaSetDefaultCommand(Command):
         except QuotaPolicyError as e:
             console.print(f"[red]Failed to create policy: {e}[/red]")
             return 1
+
+
+class QuotaEnableCommand(Command):
+    """Enable a quota policy."""
+
+    name = "quota enable"
+    description = "Enable a quota policy"
+
+    arguments = [
+        argument("type", description="Policy type (user, group, default)"),
+        argument("identifier", description="Policy identifier (email, group name, or 'default')"),
+    ]
+
+    options = [
+        option("profile", description="Configuration profile", flag=False, default=None),
+    ]
+
+    def handle(self) -> int:
+        return _set_policy_enabled(self, enabled=True)
+
+
+class QuotaDisableCommand(Command):
+    """Disable a quota policy (limits not enforced while disabled)."""
+
+    name = "quota disable"
+    description = "Disable a quota policy (limits not enforced while disabled)"
+
+    arguments = [
+        argument("type", description="Policy type (user, group, default)"),
+        argument("identifier", description="Policy identifier (email, group name, or 'default')"),
+    ]
+
+    options = [
+        option("profile", description="Configuration profile", flag=False, default=None),
+    ]
+
+    def handle(self) -> int:
+        return _set_policy_enabled(self, enabled=False)
+
+
+def _set_policy_enabled(cmd: Command, enabled: bool) -> int:
+    console = Console()
+    config = Config.load()
+    profile_name = cmd.option("profile") or config.active_profile
+    profile = config.get_profile(profile_name)
+
+    if not profile:
+        console.print(f"[red]Profile '{profile_name}' not found.[/red]")
+        return 1
+
+    type_str = cmd.argument("type")
+    identifier = cmd.argument("identifier")
+
+    try:
+        policy_type = PolicyType(type_str.lower())
+    except ValueError:
+        console.print(f"[red]Invalid policy type: {type_str}. Use 'user', 'group', or 'default'.[/red]")
+        return 1
+
+    if policy_type == PolicyType.USER and not _validate_email(identifier):
+        console.print(f"[red]Invalid email format: {identifier}[/red]")
+        return 1
+
+    try:
+        manager = _get_quota_manager(profile)
+        manager.update_policy(policy_type=policy_type, identifier=identifier, enabled=enabled)
+        state = "[green]enabled[/green]" if enabled else "[dim]disabled[/dim]"
+        console.print(f"{policy_type.value} policy '{identifier}' {state}")
+        return 0
+    except QuotaPolicyError as e:
+        console.print(f"[red]Failed: {e}[/red]")
+        return 1
 
 
 class QuotaListCommand(Command):

@@ -137,15 +137,6 @@ fields identity.arn, modelId,
     return users
 
 
-def calculate_cost(input_tokens, output_tokens, cache_tokens, cache_write_tokens=0):
-    """Calculate USD cost from token counts using configured per-million prices."""
-    return (
-        (input_tokens * PRICE_INPUT_PER_M / 1_000_000) +
-        (output_tokens * PRICE_OUTPUT_PER_M / 1_000_000) +
-        (cache_tokens * PRICE_CACHE_READ_PER_M / 1_000_000) +
-        (cache_write_tokens * PRICE_CACHE_WRITE_PER_M / 1_000_000)
-    )
-
 
 def update_quota_metrics(usage_data):
     """Atomically increment UserQuotaMetrics with delta from PromQL (like old MetricsAggregator)."""
@@ -163,7 +154,11 @@ def update_quota_metrics(usage_data):
             out = int(usage.get("output_tokens", 0))
             cache = int(usage.get("cache_tokens", 0))
             cache_write = int(usage.get("cache_write_tokens", 0))
-            cost_delta = usage.get("cost") or calculate_cost(inp, out, cache, cache_write)
+            if usage.get("cost"):
+                cost_delta = usage["cost"]
+            else:
+                pi, po, pr, pw = _get_pricing("")
+                cost_delta = inp * pi / 1_000_000 + out * po / 1_000_000 + cache * pr / 1_000_000 + cache_write * pw / 1_000_000
 
             # Check if daily_date changed (new day = reset daily counter)
             response = quota_table.get_item(Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"})
@@ -493,6 +488,8 @@ def load_all_policies():
                     "daily_token_limit": int(item.get("daily_token_limit", 0)) if item.get("daily_token_limit") else None,
                     "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
                     "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
+                    "monthly_cost_limit": float(item["monthly_cost_limit"]) if item.get("monthly_cost_limit") else None,
+                    "daily_cost_limit": float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
                     "enforcement_mode": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
                     "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
                     "enabled": item.get("enabled", True),
@@ -508,6 +505,8 @@ def load_all_policies():
                         "daily_token_limit": int(item.get("daily_token_limit", 0)) if item.get("daily_token_limit") else None,
                         "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
                         "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
+                        "monthly_cost_limit": float(item["monthly_cost_limit"]) if item.get("monthly_cost_limit") else None,
+                        "daily_cost_limit": float(item["daily_cost_limit"]) if item.get("daily_cost_limit") else None,
                         "enforcement_mode": item.get("monthly_enforcement_mode", item.get("enforcement_mode", "alert")),
                         "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
                         "enabled": item.get("enabled", True),
@@ -549,6 +548,7 @@ def check_limits_and_generate_alerts(email, total_tokens, daily_tokens, total_co
     alerts = []
     policy_info = f"{policy['policy_type']}:{policy['identifier']}"
     enforcement_mode = policy.get("enforcement_mode", "alert")
+    daily_enforcement_mode = policy.get("daily_enforcement_mode", "alert")
     monthly_cost_limit = policy.get("monthly_cost_limit") or 0
     daily_cost_limit = policy.get("daily_cost_limit") or 0
 
@@ -612,7 +612,7 @@ def check_limits_and_generate_alerts(email, total_tokens, daily_tokens, total_co
                 "user": email, "alert_type": "daily_cost", "alert_level": dlevel,
                 "current_usage": round(daily_cost, 4), "limit": daily_cost_limit,
                 "percentage": round(dpct, 1), "date": current_date,
-                "policy_info": policy_info, "enforcement_mode": enforcement_mode,
+                "policy_info": policy_info, "enforcement_mode": daily_enforcement_mode,
             })
     else:
         daily_limit = policy.get("daily_token_limit")
@@ -630,7 +630,7 @@ def check_limits_and_generate_alerts(email, total_tokens, daily_tokens, total_co
                     "user": email, "alert_type": "daily", "alert_level": dlevel,
                     "current_usage": int(daily_tokens), "limit": daily_limit,
                     "percentage": round(daily_pct, 1), "date": current_date,
-                    "policy_info": policy_info, "enforcement_mode": enforcement_mode,
+                    "policy_info": policy_info, "enforcement_mode": daily_enforcement_mode,
                 })
     return alerts
 
