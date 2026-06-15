@@ -81,15 +81,15 @@
       if (!hb) {
         // User has usage today but has never sent a heartbeat — show grey
         return '<span class="hb">' +
-          '<span class="hb-dot grey" title="Direct CW heartbeat: no data"></span>' +
-          '<span class="hb-dot grey" title="OTLP heartbeat via otelcol: no data"></span>' +
+          '<span class="hb-dot grey" title="credential-process: no data"></span>' +
+          '<span class="hb-dot grey" title="otelcol: no data"></span>' +
           '</span>';
       }
       const cwCls  = hb.cw   ? 'green' : 'red';
       const otlpCls = hb.otlp ? 'green' : 'red';
       return '<span class="hb">' +
-        '<span class="hb-dot ' + cwCls  + '" title="Direct CW heartbeat (last 15 min)"></span>' +
-        '<span class="hb-dot ' + otlpCls + '" title="OTLP heartbeat via otelcol (last 15 min)"></span>' +
+        '<span class="hb-dot ' + cwCls  + '" title="credential-process running (last 15 min)"></span>' +
+        '<span class="hb-dot ' + otlpCls + '" title="otelcol running (last 15 min)"></span>' +
         '</span>';
     }
 

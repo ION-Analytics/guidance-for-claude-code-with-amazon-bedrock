@@ -160,8 +160,8 @@ def heartbeats():
     """Return heartbeat status for all users seen today.
 
     Queries two CloudWatch metrics over the last 15 minutes:
-    - ClaudeCode/Security / CollectorHeartbeat  (direct CW PUT from daemon)
-    - ClaudeCode          / claude_code.daemon.heartbeat  (OTLP path via otelcol)
+    - ClaudeCode/Security / CollectorHeartbeat  (daemon alive)
+    - ClaudeCode/Security / OtelcolHeartbeat    (otelcol process running)
 
     Returns {email: {cw: bool, otlp: bool}} for every user that has ever sent
     either heartbeat (ListMetrics determines the known set).
@@ -175,7 +175,7 @@ def heartbeats():
     try:
         for namespace, metric_name, dim_name in [
             ("ClaudeCode/Security", "CollectorHeartbeat", "UserEmail"),
-            ("ClaudeCode", "claude_code.daemon.heartbeat", "user.email"),
+            ("ClaudeCode/Security", "OtelcolHeartbeat", "UserEmail"),
         ]:
             paginator = cw.get_paginator("list_metrics")
             for page in paginator.paginate(Namespace=namespace, MetricName=metric_name):
@@ -193,7 +193,7 @@ def heartbeats():
     result = {}
     user_list = sorted(users)
 
-    # Build metric data queries (2 per user: cw + otlp)
+    # Build metric data queries (2 per user: daemon + otelcol)
     queries = []
     for email in user_list:
         safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
@@ -214,9 +214,9 @@ def heartbeats():
             "Id": f"otlp_{safe}",
             "MetricStat": {
                 "Metric": {
-                    "Namespace": "ClaudeCode",
-                    "MetricName": "claude_code.daemon.heartbeat",
-                    "Dimensions": [{"Name": "user.email", "Value": email}],
+                    "Namespace": "ClaudeCode/Security",
+                    "MetricName": "OtelcolHeartbeat",
+                    "Dimensions": [{"Name": "UserEmail", "Value": email}],
                 },
                 "Period": 900,
                 "Stat": "Sum",

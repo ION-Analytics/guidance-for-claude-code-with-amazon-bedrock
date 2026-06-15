@@ -10,15 +10,12 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,12 +32,9 @@ import (
 )
 
 const (
-	interval        = 300 * time.Second // 5 minutes between health checks
-	otlpEndpoint    = "http://localhost:4318/v1/metrics"
-	cwMetricName    = "CollectorHeartbeat"
-	cwNamespace     = "ClaudeCode/Security"
-	cwDimName       = "UserEmail"
-	collectorPort   = 8888
+	interval      = 300 * time.Second // 5 minutes between health checks
+	cwNamespace   = "ClaudeCode/Security"
+	collectorPort = 8888
 )
 
 // Run is the main entry point for daemon mode. It blocks until a signal is received.
@@ -137,7 +131,7 @@ func Run(profile string, installDir string, cacheDir string) {
 		// Send heartbeat
 		email := strings.ToLower(d.readEmail())
 		if email != "" {
-			d.sendHeartbeat(email)
+			d.sendHeartbeat(email, otelcolRunning(collectorPidFile))
 		} else {
 			logger.infof("no email found, skipping heartbeat")
 		}
@@ -339,28 +333,16 @@ func (d *daemonState) startOtelcol() {
 	}()
 }
 
-func (d *daemonState) sendHeartbeat(email string) {
-	tsNs := uint64(time.Now().UnixNano())
-	payload := buildOTLPHeartbeat(email, tsNs)
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, otlpEndpoint, bytes.NewReader(payload))
-	if err != nil {
-		d.logger.warnf("heartbeat request build failed: %v", err)
-	} else {
-		req.Header.Set("Content-Type", "application/x-protobuf")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			d.logger.warnf("heartbeat send failed: %v", err)
-		} else {
-			resp.Body.Close()
-			d.logger.infof("heartbeat sent for %s status=%d", email, resp.StatusCode)
-		}
+func (d *daemonState) sendHeartbeat(email string, otelcolUp bool) {
+	// Dot 1: credential-process alive (always sent — we are the credential-process daemon)
+	d.sendCloudWatchMetric(email, "CollectorHeartbeat", "UserEmail")
+	// Dot 2: otelcol running
+	if otelcolUp {
+		d.sendCloudWatchMetric(email, "OtelcolHeartbeat", "UserEmail")
 	}
-
-	d.sendCloudWatchHeartbeat(email)
 }
 
-func (d *daemonState) sendCloudWatchHeartbeat(email string) {
+func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimName string) {
 	creds, err := readCredentials(d.profile)
 	if err != nil || creds == nil || isExpiredPlaceholder(creds) {
 		d.logger.warnf("credentials unavailable for direct CW heartbeat")
@@ -382,10 +364,10 @@ func (d *daemonState) sendCloudWatchHeartbeat(email string) {
 	body.Set("Action", "PutMetricData")
 	body.Set("Version", "2010-08-01")
 	body.Set("Namespace", cwNamespace)
-	body.Set("MetricData.member.1.MetricName", cwMetricName)
+	body.Set("MetricData.member.1.MetricName", metricName)
 	body.Set("MetricData.member.1.Value", "1.0")
 	body.Set("MetricData.member.1.Unit", "Count")
-	body.Set("MetricData.member.1.Dimensions.member.1.Name", cwDimName)
+	body.Set("MetricData.member.1.Dimensions.member.1.Name", dimName)
 	body.Set("MetricData.member.1.Dimensions.member.1.Value", email)
 	bodyStr := body.Encode()
 
@@ -467,7 +449,7 @@ func (d *daemonState) sendCloudWatchHeartbeat(email string) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	d.logger.infof("direct CW heartbeat sent for %s status=%d", email, resp.StatusCode)
+	d.logger.infof("CW %s sent for %s status=%d", metricName, email, resp.StatusCode)
 }
 
 // ---------------------------------------------------------------------------
@@ -567,50 +549,6 @@ func isExpiredPlaceholder(c *awsStaticCreds) bool {
 // OTLP protobuf helpers
 // ---------------------------------------------------------------------------
 
-// buildOTLPHeartbeat encodes a minimal OTLP ExportMetricsServiceRequest for
-// the claude_code.daemon.heartbeat metric, exactly matching the Python version.
-func buildOTLPHeartbeat(email string, tsNs uint64) []byte {
-	// Encode helpers (protobuf wire format)
-	varint := func(n uint64) []byte {
-		var buf []byte
-		for {
-			b := byte(n & 0x7F)
-			n >>= 7
-			if n != 0 {
-				b |= 0x80
-			}
-			buf = append(buf, b)
-			if n == 0 {
-				break
-			}
-		}
-		return buf
-	}
-	tag := func(field int, wire int) []byte { return varint(uint64(field<<3 | wire)) }
-	ldelim := func(field int, data []byte) []byte {
-		return append(append(tag(field, 2), varint(uint64(len(data)))...), data...)
-	}
-	stringField := func(field int, s string) []byte { return ldelim(field, []byte(s)) }
-	fixed64Field := func(field int, v uint64) []byte {
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, v)
-		return append(tag(field, 1), b...)
-	}
-	doubleField := func(field int, v float64) []byte {
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, math.Float64bits(v))
-		return append(tag(field, 1), b...)
-	}
-
-	anyValue := stringField(1, email)
-	kv := append(stringField(1, "user.email"), ldelim(2, anyValue)...)
-	datapoint := append(append(ldelim(1, kv), fixed64Field(3, tsNs)...), doubleField(4, 1.0)...)
-	gauge := ldelim(1, datapoint)
-	metric := append(stringField(1, "claude_code.daemon.heartbeat"), ldelim(5, gauge)...)
-	scopeMetrics := ldelim(3, metric)
-	resourceMetrics := ldelim(2, scopeMetrics)
-	return ldelim(1, resourceMetrics)
-}
 
 // ---------------------------------------------------------------------------
 // misc helpers
