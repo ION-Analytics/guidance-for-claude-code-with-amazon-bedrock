@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"ccwb-go/internal/config"
+	"ccwb-go/internal/daemon"
 	"ccwb-go/internal/federation"
 	"ccwb-go/internal/jwt"
 	"ccwb-go/internal/oidc"
@@ -47,10 +49,23 @@ func main() {
 	showTags := flag.Bool("show-tags", false, "Print the https://aws.amazon.com/tags claim from the cached ID token (debug)")
 	getTag := flag.String("get-tag", "", "Print the value of a single principal tag from the cached ID token (e.g. --get-tag Zone). Exit codes: 0 hit, 2 absent, 4 expired.")
 	setClientSecret := flag.Bool("set-client-secret", false, "Prompt for and store an Azure client secret in the OS keyring")
+	daemonMode := flag.Bool("daemon", false, "Run as the credential daemon (manages otelcol lifecycle and emits heartbeat metrics)")
 	flag.Parse()
 
 	if *versionFlag || *shortVersion {
 		fmt.Printf("credential-process %s\n", version.Version)
+		os.Exit(0)
+	}
+
+	if *daemonMode {
+		home, _ := os.UserHomeDir()
+		installDir := filepath.Join(home, "claude-code-with-bedrock")
+		cacheDir := filepath.Join(home, ".claude-code-session")
+		p := *profileFlag
+		if *shortProfile != "" {
+			p = *shortProfile
+		}
+		daemon.Run(p, installDir, cacheDir)
 		os.Exit(0)
 	}
 
@@ -388,6 +403,11 @@ func (a *credentialApp) getTag(key string) int {
 }
 
 func (a *credentialApp) run() int {
+	// Ensure the background daemon (otelcol manager + heartbeat) is running.
+	// Non-blocking: spawns detached child and returns immediately.
+	home, _ := os.UserHomeDir()
+	daemon.EnsureRunning(a.profile, filepath.Join(home, "claude-code-with-bedrock"))
+
 	// Check cache first
 	if cached := a.getCachedCredentials(); cached != nil {
 		// Periodic quota re-check — must happen before returning cached creds
