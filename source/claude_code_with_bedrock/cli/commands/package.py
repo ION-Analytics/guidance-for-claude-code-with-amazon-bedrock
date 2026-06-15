@@ -128,7 +128,7 @@ class PackageCommand(Command):
             default=None,
         ),
         option("build-verbose", description="Enable verbose logging for build processes", flag=True),
-        option("go", description="Build binaries using Go cross-compilation (native binaries, no AV false positives)", flag=True),
+        option("no-go", description="Use Python/Nuitka build instead of Go cross-compilation (Go is the default)", flag=True),
     ]
 
     def handle(self) -> int:
@@ -159,7 +159,7 @@ class PackageCommand(Command):
             return 1
 
         # Go build mode: all platforms always available via cross-compilation
-        use_go = self.option("go")
+        use_go = not self.option("no-go")
 
         # Interactive prompts if not provided via CLI
         target_platform = self.option("target-platform")

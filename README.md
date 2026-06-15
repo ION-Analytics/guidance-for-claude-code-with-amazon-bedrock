@@ -233,8 +233,8 @@ The authentication tools support all major platforms:
 
 Two build paths are available:
 
-- **Go binary** (`ccwb package --go`): Cross-compiles all platforms locally in seconds. Requires Go 1.23+. No Docker, no AWS CodeBuild, no universal2 Python required. Recommended for most deployments.
-- **Python/Nuitka binary** (default): Uses PyInstaller for macOS/Linux and AWS CodeBuild with Nuitka for Windows. All builds create standalone executables — no Python installation required for end users.
+- **Go binary** (default, `ccwb package`): Cross-compiles all platforms locally in seconds. Requires Go 1.23+. No Docker, no AWS CodeBuild, no universal2 Python required.
+- **Python/Nuitka binary** (`ccwb package --no-go`): Uses PyInstaller for macOS/Linux and AWS CodeBuild with Nuitka for Windows. All builds create standalone executables — no Python installation required for end users.
 
 See [QUICK_START.md](QUICK_START.md#platform-builds) for detailed build configuration.
 

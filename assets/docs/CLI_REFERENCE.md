@@ -248,7 +248,7 @@ poetry run ccwb package [options]
   - `linux-arm64` - Build for Linux ARM64 using Docker
   - `windows` - Build for Windows (uses CodeBuild or `--go` for local cross-compile)
   - `all` - Build for all available platforms
-- `--go` - Build using the Go credential-process binary instead of the Python/Nuitka binary. Cross-compiles all platforms locally (no Docker, no CodeBuild required). Also adds Windows to the build targets. Recommended for simpler builds.
+- `--no-go` - Use the Python/Nuitka build system instead of Go. By default, `ccwb package` uses Go cross-compilation (all platforms built locally, no Docker or CodeBuild required). Pass `--no-go` to revert to the Python/PyInstaller/Nuitka path.
 - `--distribute` - Upload package and generate distribution URL
 - `--expires-hours <hours>` - Distribution URL expiration in hours (with --distribute) [default: "48"]
 - `--profile <name>` - Configuration profile to use [default: "default"]
@@ -268,15 +268,15 @@ poetry run ccwb package [options]
 
 **Build Systems:**
 
-There are two build paths — choose one:
+There are two build paths:
 
-**Go binary (recommended, `--go` flag):**
+**Go binary (default):**
 - Cross-compiles all platforms (macOS ARM64/Intel, Linux x64/ARM64, Windows x64) from your local machine
 - No Docker, no AWS CodeBuild, no universal2 Python required
 - Requires Go 1.23+ installed locally
 - Outputs `credential-process-<platform>` binaries (same names as Python builds)
 
-**Python/Nuitka binary (default, no `--go` flag):**
+**Python/Nuitka binary (`--no-go` flag):**
 - **macOS**: Uses PyInstaller with architecture-specific builds
   - ARM64: Native build on Apple Silicon Macs only — cannot run on Intel Macs
   - Intel: Runs natively on Intel Macs and on Apple Silicon via Rosetta — covers all Mac users with one binary
