@@ -29,6 +29,12 @@
     tbody tr:not(.user-first) td.email { color: transparent; }
     td { padding: 6px 12px; text-align: right; color: #8b949e; }
     td.email { text-align: left; min-width: 240px; color: #8b949e; }
+    .hb { display: inline-flex; gap: 3px; margin-left: 7px; vertical-align: middle; }
+    .hb-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .hb-dot.green { background: #3fb950; }
+    .hb-dot.red   { background: #f85149; }
+    .hb-dot.grey  { background: #484f58; }
+    .hb-dot[title] { cursor: default; }
     td.model { text-align: left; color: #79c0ff; }
     td.cost { color: #a5d6ff; }
     td.user-total { color: #3fb950; font-weight: 600; }
@@ -58,6 +64,7 @@
     let prevDays = 0;
     let timer = null;
     const REFRESH_MS = 30000;
+    let heartbeats = {};  // {email: {cw: bool, otlp: bool}}
 
     function changeDays(val) {
       prevDays = parseInt(val, 10);
@@ -69,14 +76,35 @@
     function fmt(n) { return n.toLocaleString(); }
     function fmtCost(n) { return '$' + n.toFixed(4); }
 
+    function hbDots(email) {
+      const hb = heartbeats[email];
+      if (!hb) return '';
+      const cwCls  = hb.cw   ? 'green' : 'red';
+      const otlpCls = hb.otlp ? 'green' : 'red';
+      return '<span class="hb">' +
+        '<span class="hb-dot ' + cwCls  + '" title="Direct CW heartbeat (last 15 min)"></span>' +
+        '<span class="hb-dot ' + otlpCls + '" title="OTLP heartbeat via otelcol (last 15 min)"></span>' +
+        '</span>';
+    }
+
+    async function loadHeartbeats() {
+      try {
+        const res = await fetch('/api/heartbeats');
+        if (res.ok) heartbeats = await res.json();
+      } catch (_) { /* non-fatal */ }
+    }
+
     async function load() {
       const badge = document.getElementById('badge');
       badge.innerHTML = prevDays === 0 ? '<span class="spinner"></span> live' : '● hist';
       badge.className = 'badge ' + (prevDays === 0 ? 'live' : 'hist');
 
+      // Fetch usage and heartbeats in parallel; heartbeats only meaningful for today
+      const fetchUsage = fetch('/api/usage?prev_days=' + prevDays).then(r => r.json());
+      const fetchHb = prevDays === 0 ? loadHeartbeats() : Promise.resolve();
+
       try {
-        const res = await fetch('/api/usage?prev_days=' + prevDays);
-        const data = await res.json();
+        const [data] = await Promise.all([fetchUsage, fetchHb]);
         document.getElementById('meta').textContent =
           data.date_label + (prevDays === 0 ? ' from midnight UTC' : ' full day UTC') +
           '  |  queried at ' + data.queried_at;
@@ -101,8 +129,11 @@
 
         data.rows.forEach(r => {
           const isFirst = r.email !== prevEmail;
+          const emailCell = isFirst
+            ? r.email + (prevDays === 0 ? hbDots(r.email) : '')
+            : '';
           html += '<tr class="' + (isFirst ? 'user-first' : '') + '">';
-          html += '<td class="email">' + (isFirst ? r.email : '') + '</td>';
+          html += '<td class="email">' + emailCell + '</td>';
           html += '<td class="model">' + r.model + '</td>';
           html += '<td>' + fmt(r.calls) + '</td>';
           html += '<td>' + fmt(r.input_tokens) + '</td>';

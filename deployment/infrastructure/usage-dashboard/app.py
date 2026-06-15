@@ -155,5 +155,99 @@ def usage():
     return jsonify({"rows": rows, "date_label": date_label, "queried_at": queried_at})
 
 
+@app.route("/api/heartbeats")
+def heartbeats():
+    """Return heartbeat status for all users seen today.
+
+    Queries two CloudWatch metrics over the last 15 minutes:
+    - ClaudeCode/Security / CollectorHeartbeat  (direct CW PUT from daemon)
+    - ClaudeCode          / claude_code.daemon.heartbeat  (OTLP path via otelcol)
+
+    Returns {email: {cw: bool, otlp: bool}} for every user that has ever sent
+    either heartbeat (ListMetrics determines the known set).
+    """
+    cw = boto3.client("cloudwatch", region_name=REGION)
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(minutes=15)
+
+    # Collect all known users from both metric dimensions
+    users = set()
+    try:
+        for namespace, metric_name, dim_name in [
+            ("ClaudeCode/Security", "CollectorHeartbeat", "UserEmail"),
+            ("ClaudeCode", "claude_code.daemon.heartbeat", "user.email"),
+        ]:
+            paginator = cw.get_paginator("list_metrics")
+            for page in paginator.paginate(Namespace=namespace, MetricName=metric_name):
+                for m in page.get("Metrics", []):
+                    for d in m.get("Dimensions", []):
+                        if d["Name"] == dim_name and "@" in d["Value"]:
+                            users.add(d["Value"].lower())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not users:
+        return jsonify({})
+
+    # Batch GetMetricData — max 500 queries per call; each user needs 2 queries
+    result = {}
+    user_list = sorted(users)
+
+    # Build metric data queries (2 per user: cw + otlp)
+    queries = []
+    for email in user_list:
+        safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
+        queries.append({
+            "Id": f"cw_{safe}",
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": "ClaudeCode/Security",
+                    "MetricName": "CollectorHeartbeat",
+                    "Dimensions": [{"Name": "UserEmail", "Value": email}],
+                },
+                "Period": 900,
+                "Stat": "Sum",
+            },
+            "ReturnData": True,
+        })
+        queries.append({
+            "Id": f"otlp_{safe}",
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": "ClaudeCode",
+                    "MetricName": "claude_code.daemon.heartbeat",
+                    "Dimensions": [{"Name": "user.email", "Value": email}],
+                },
+                "Period": 900,
+                "Stat": "Sum",
+            },
+            "ReturnData": True,
+        })
+
+    # GetMetricData accepts max 500 queries per call
+    try:
+        BATCH = 500
+        all_results = {}
+        for i in range(0, len(queries), BATCH):
+            resp = cw.get_metric_data(
+                MetricDataQueries=queries[i:i + BATCH],
+                StartTime=window_start,
+                EndTime=now,
+            )
+            for r in resp.get("MetricDataResults", []):
+                all_results[r["Id"]] = any(v > 0 for v in r.get("Values", []))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    for email in user_list:
+        safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
+        result[email] = {
+            "cw": all_results.get(f"cw_{safe}", False),
+            "otlp": all_results.get(f"otlp_{safe}", False),
+        }
+
+    return jsonify(result)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
