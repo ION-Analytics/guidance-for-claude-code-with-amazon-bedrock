@@ -22,6 +22,8 @@ This document provides a complete reference for all `ccwb` (Claude Code with Bed
     - [`quota set-group` - Set Group Quota](#quota-set-group---set-group-quota)
     - [`quota set-default` - Set Default Quota](#quota-set-default---set-default-quota)
     - [`quota list` - List Policies](#quota-list---list-policies)
+    - [`quota enable` - Enable Policy](#quota-enable---enable-policy)
+    - [`quota disable` - Disable Policy](#quota-disable---disable-policy)
     - [`quota delete` - Delete Policy](#quota-delete---delete-policy)
     - [`quota show` - Show Effective Quota](#quota-show---show-effective-quota)
     - [`quota usage` - Show Usage](#quota-usage---show-usage)
@@ -244,8 +246,9 @@ poetry run ccwb package [options]
   - `linux` - Build for Linux (native, current architecture)
   - `linux-x64` - Build for Linux x64 using Docker
   - `linux-arm64` - Build for Linux ARM64 using Docker
-  - `windows` - Build for Windows (uses CodeBuild - requires enabling during init)
+  - `windows` - Build for Windows (uses CodeBuild or `--go` for local cross-compile)
   - `all` - Build for all available platforms
+- `--go` - Build using the Go credential-process binary instead of the Python/Nuitka binary. Cross-compiles all platforms locally (no Docker, no CodeBuild required). Also adds Windows to the build targets. Recommended for simpler builds.
 - `--distribute` - Upload package and generate distribution URL
 - `--expires-hours <hours>` - Distribution URL expiration in hours (with --distribute) [default: "48"]
 - `--profile <name>` - Configuration profile to use [default: "default"]
@@ -263,8 +266,17 @@ poetry run ccwb package [options]
 - Creates user documentation
 - Optionally uploads to S3 and generates presigned URL (with --distribute)
 
-**Platform Support (Hybrid Build System):**
+**Build Systems:**
 
+There are two build paths — choose one:
+
+**Go binary (recommended, `--go` flag):**
+- Cross-compiles all platforms (macOS ARM64/Intel, Linux x64/ARM64, Windows x64) from your local machine
+- No Docker, no AWS CodeBuild, no universal2 Python required
+- Requires Go 1.23+ installed locally
+- Outputs `credential-process-<platform>` binaries (same names as Python builds)
+
+**Python/Nuitka binary (default, no `--go` flag):**
 - **macOS**: Uses PyInstaller with architecture-specific builds
   - ARM64: Native build on Apple Silicon Macs only — cannot run on Intel Macs
   - Intel: Runs natively on Intel Macs and on Apple Silicon via Rosetta — covers all Mac users with one binary
@@ -662,7 +674,8 @@ poetry run ccwb quota set-user <email> [options]
 - `--daily-limit, -d <tokens>` - Daily token limit (optional)
 - `--monthly-cost-limit <usd>` - Monthly cost limit in USD (e.g. `30.00`)
 - `--daily-cost-limit <usd>` - Daily cost limit in USD (e.g. `4.00`)
-- `--enforcement, -e <mode>` - Enforcement mode: `alert` (monitor only) or `block` (deny access)
+- `--monthly-enforcement, -e <mode>` - Monthly enforcement mode: `alert` (monitor only) or `block` (deny access)
+- `--daily-enforcement <mode>` - Daily enforcement mode: `alert` (monitor only) or `block` (deny access)
 - `--disabled` - Create policy in disabled state
 - `--profile, -p <name>` - Configuration profile
 
@@ -671,9 +684,10 @@ poetry run ccwb quota set-user <email> [options]
 # Token limits only
 poetry run ccwb quota set-user alice@example.com -m 500M -d 20M -e block
 
-# With cost limits
+# With cost limits and separate daily/monthly enforcement
 poetry run ccwb quota set-user alice@example.com -m 500M -d 20M \
-  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 -e block
+  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 \
+  --monthly-enforcement block --daily-enforcement alert
 ```
 
 ### `quota set-group` - Set Group Quota
@@ -692,7 +706,8 @@ poetry run ccwb quota set-group <group> [options]
 
 **Example:**
 ```bash
-poetry run ccwb quota set-group engineering -m 400M -d 20M --monthly-cost-limit 150.00 -e alert
+poetry run ccwb quota set-group engineering -m 400M -d 20M \
+  --monthly-cost-limit 150.00 --monthly-enforcement alert
 ```
 
 ### `quota set-default` - Set Default Quota
@@ -709,7 +724,8 @@ poetry run ccwb quota set-default [options]
 **Example:**
 ```bash
 poetry run ccwb quota set-default -m 225M -d 8M \
-  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 -e block
+  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 \
+  --monthly-enforcement block --daily-enforcement alert
 ```
 
 ### `quota list` - List Policies
@@ -725,6 +741,51 @@ poetry run ccwb quota list [options]
 - `--profile, -p <name>` - Configuration profile
 
 The table includes columns for Monthly Tokens, Daily Tokens, Monthly Cost, and Daily Cost. Cost columns show `-` when no cost limit is set.
+
+### `quota enable` - Enable Policy
+
+Enables a quota policy that was created in a disabled state or previously disabled.
+
+```bash
+poetry run ccwb quota enable <type> <identifier> [options]
+```
+
+**Arguments:**
+- `<type>` - Policy type: `user`, `group`, or `default`
+- `<identifier>` - Email (for user), group name, or "default"
+
+**Options:**
+- `--profile, -p <name>` - Configuration profile
+
+**Example:**
+```bash
+poetry run ccwb quota enable user alice@example.com
+poetry run ccwb quota enable group engineering
+```
+
+### `quota disable` - Disable Policy
+
+Disables a quota policy without deleting it. Disabled policies are skipped during quota resolution — the user falls through to the next applicable policy (group or default). Use this to temporarily lift limits without losing the policy configuration.
+
+```bash
+poetry run ccwb quota disable <type> <identifier> [options]
+```
+
+**Arguments:**
+- `<type>` - Policy type: `user`, `group`, or `default`
+- `<identifier>` - Email (for user), group name, or "default"
+
+**Options:**
+- `--profile, -p <name>` - Configuration profile
+
+**Example:**
+```bash
+# Temporarily lift alice's individual limit (falls through to group/default policy)
+poetry run ccwb quota disable user alice@example.com
+
+# Re-enable when ready
+poetry run ccwb quota enable user alice@example.com
+```
 
 ### `quota delete` - Delete Policy
 

@@ -179,18 +179,24 @@ Use the `ccwb quota` commands to manage policies:
 ```bash
 # Set a user-specific policy with token and cost limits
 ccwb quota set-user john.doe@company.com --monthly-limit 500M --daily-limit 20M \
-  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 --enforcement block
+  --monthly-cost-limit 30.00 --daily-cost-limit 4.00 \
+  --monthly-enforcement block --daily-enforcement alert
 
 # Set a group policy
 ccwb quota set-group engineering --monthly-limit 400M --monthly-cost-limit 150.00
 
 # Set the default policy for all users
 ccwb quota set-default --monthly-limit 225M --daily-limit 8M \
-  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 --enforcement block
+  --monthly-cost-limit 150.00 --daily-cost-limit 30.00 \
+  --monthly-enforcement block --daily-enforcement alert
 
-# List all policies (shows token and cost limits)
+# List all policies (shows token and cost limits, enabled status)
 ccwb quota list
 ccwb quota list --type group
+
+# Enable or disable a policy without deleting it
+ccwb quota disable user john.doe@company.com   # policy skipped; falls to group/default
+ccwb quota enable user john.doe@company.com    # re-activate
 
 # Show effective policy for a user (resolves user > group > default)
 ccwb quota show john.doe@company.com
@@ -505,8 +511,10 @@ For detailed monitoring setup, see the [Monitoring Guide](MONITORING.md).
 ### UserQuotaMetrics Table
 
 **User Totals**: `PK: USER#{email}`, `SK: MONTH#{YYYY-MM}`
-- Attributes: `total_tokens`, `daily_tokens`, `daily_date`, `total_cost`, `daily_cost`, `input_tokens`, `output_tokens`, `cache_tokens`, `groups`, `last_updated`, `email`
-- `total_cost`: accumulated USD cost for the current month (Decimal, 4dp)
+- Attributes: `total_tokens`, `daily_tokens`, `daily_date`, `total_cost`, `daily_cost`, `input_tokens`, `output_tokens`, `cache_tokens`, `cache_write_tokens`, `groups`, `last_updated`, `email`
+- `total_tokens`: sum of all token types including cache writes; used for enforcement
+- `input_tokens`, `output_tokens`, `cache_tokens` (cache read), `cache_write_tokens`: per-type breakdowns for auditability
+- `total_cost`: accumulated USD cost for the current month (Decimal, 6dp)
 - `daily_cost`: accumulated USD cost for `daily_date` (reset to 0 when date changes)
 - `daily_date`: the date (YYYY-MM-DD UTC) that `daily_tokens` and `daily_cost` apply to
 - TTL: End of following month
@@ -520,8 +528,10 @@ For detailed monitoring setup, see the [Monitoring Guide](MONITORING.md).
 ### QuotaPolicies Table
 
 **Policy Records**: `PK: POLICY#{type}#{identifier}`, `SK: CURRENT`
-- Attributes: `policy_type`, `identifier`, `monthly_token_limit`, `daily_token_limit`, `monthly_cost_limit`, `daily_cost_limit`, `warning_threshold_80`, `warning_threshold_90`, `enforcement_mode`, `enabled`, `created_at`, `updated_at`, `created_by`
+- Attributes: `policy_type`, `identifier`, `monthly_token_limit`, `daily_token_limit`, `monthly_cost_limit`, `daily_cost_limit`, `warning_threshold_80`, `warning_threshold_90`, `monthly_enforcement_mode`, `daily_enforcement_mode`, `enabled`, `created_at`, `updated_at`, `created_by`
+- `monthly_enforcement_mode` / `daily_enforcement_mode`: `"alert"` or `"block"` — configured independently for monthly and daily limits
 - `monthly_cost_limit` / `daily_cost_limit`: optional USD cost limits (Decimal, stored as string for DynamoDB precision)
+- `enabled`: when `false`, this policy is skipped during quota resolution (user falls through to group/default policy)
 - User policy identifiers are stored in lowercase (e.g. `POLICY#user#john.doe@company.com`)
 
 **GSI: PolicyTypeIndex**
@@ -564,14 +574,16 @@ When `enforcement_mode` is set to `"block"` for a policy, the system will deny c
 Enable blocking for a policy:
 
 ```bash
-# Set user policy with blocking enabled
-ccwb quota set-user john.doe@company.com --monthly-limit 10M --enforcement block
+# Set user policy with monthly blocking and daily alerting
+ccwb quota set-user john.doe@company.com --monthly-limit 10M \
+  --monthly-enforcement block --daily-enforcement alert
 
 # Set group policy with blocking
-ccwb quota set-group engineering --monthly-limit 50M --enforcement block
+ccwb quota set-group engineering --monthly-limit 50M --monthly-enforcement block
 
-# Set default with blocking
-ccwb quota set-default --monthly-limit 225M --enforcement block
+# Set default with monthly block, daily alert
+ccwb quota set-default --monthly-limit 225M \
+  --monthly-enforcement block --daily-enforcement alert
 ```
 
 ### Admin Override (Unblock)

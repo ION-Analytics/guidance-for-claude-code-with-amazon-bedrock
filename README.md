@@ -159,7 +159,7 @@ For deployment patterns and best practices, see the [Claude Code deployment patt
 - Poetry (dependency management)
 - AWS CLI v2
 - Git
-- Go 1.23+ (optional — only needed for building the OTEL collector sidecar)
+- Go 1.23+ (required for `ccwb package --go`; also needed for building the OTEL collector sidecar)
 
 **AWS Requirements:**
 
@@ -221,18 +221,20 @@ This automatically routes requests across multiple AWS regions to ensure the bes
 
 The authentication tools support all major platforms:
 
-| Platform | Architecture          | Build Method                | Installation |
-| -------- | --------------------- | --------------------------- | ------------ |
-| Windows  | x64                   | AWS CodeBuild (Nuitka)      | install.bat  |
-| macOS    | ARM64 (Apple Silicon) | Native (PyInstaller)        | install.sh   |
-| macOS    | Intel (x86_64)        | Cross-compile (PyInstaller) | install.sh   |
-| macOS    | Universal (both)      | Universal2 (PyInstaller)    | install.sh   |
-| Linux    | x86_64                | Docker (PyInstaller)        | install.sh   |
-| Linux    | ARM64                 | Docker (PyInstaller)        | install.sh   |
+| Platform | Architecture          | Build Method (Go)           | Build Method (Python)       | Installation |
+| -------- | --------------------- | --------------------------- | --------------------------- | ------------ |
+| Windows  | x64                   | Local cross-compile (Go)    | AWS CodeBuild (Nuitka)      | install.bat  |
+| macOS    | ARM64 (Apple Silicon) | Local cross-compile (Go)    | Native (PyInstaller)        | install.sh   |
+| macOS    | Intel (x86_64)        | Local cross-compile (Go)    | Cross-compile (PyInstaller) | install.sh   |
+| Linux    | x86_64                | Local cross-compile (Go)    | Docker (PyInstaller)        | install.sh   |
+| Linux    | ARM64                 | Local cross-compile (Go)    | Docker (PyInstaller)        | install.sh   |
 
 **Build System:**
 
-The package builder automatically creates executables for all platforms using PyInstaller (macOS/Linux) and AWS CodeBuild with Nuitka (Windows). All builds create standalone executables - no Python installation required for end users.
+Two build paths are available:
+
+- **Go binary** (`ccwb package --go`): Cross-compiles all platforms locally in seconds. Requires Go 1.23+. No Docker, no AWS CodeBuild, no universal2 Python required. Recommended for most deployments.
+- **Python/Nuitka binary** (default): Uses PyInstaller for macOS/Linux and AWS CodeBuild with Nuitka for Windows. All builds create standalone executables — no Python installation required for end users.
 
 See [QUICK_START.md](QUICK_START.md#platform-builds) for detailed build configuration.
 
