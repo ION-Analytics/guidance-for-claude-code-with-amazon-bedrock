@@ -78,7 +78,13 @@
 
     function hbDots(email) {
       const hb = heartbeats[email];
-      if (!hb) return '';
+      if (!hb) {
+        // User has usage today but has never sent a heartbeat — show grey
+        return '<span class="hb">' +
+          '<span class="hb-dot grey" title="Direct CW heartbeat: no data"></span>' +
+          '<span class="hb-dot grey" title="OTLP heartbeat via otelcol: no data"></span>' +
+          '</span>';
+      }
       const cwCls  = hb.cw   ? 'green' : 'red';
       const otlpCls = hb.otlp ? 'green' : 'red';
       return '<span class="hb">' +

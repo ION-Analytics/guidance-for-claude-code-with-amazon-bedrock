@@ -135,7 +135,7 @@ func Run(profile string, installDir string, cacheDir string) {
 		}
 
 		// Send heartbeat
-		email := d.readEmail()
+		email := strings.ToLower(d.readEmail())
 		if email != "" {
 			d.sendHeartbeat(email)
 		} else {

@@ -448,6 +448,11 @@ Resources:
                   - logs:GetQueryResults
                   - logs:StopQuery
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:bedrock-model-invocation:*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:GetMetricData
+                Resource: '*'
 
   UsageDashboardExecutionRole:
     Type: AWS::IAM::Role
