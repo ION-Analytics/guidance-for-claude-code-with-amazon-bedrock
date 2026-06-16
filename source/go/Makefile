@@ -1,4 +1,4 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION ?= $(shell cat VERSION 2>/dev/null || git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X ccwb-go/internal/version.Version=$(VERSION)
 # Windows: do NOT strip (-s -w). Defender cloud ML (Wacatac.B!ml) flags
 # stripped Go binaries and blocks them in subprocess/non-interactive contexts.

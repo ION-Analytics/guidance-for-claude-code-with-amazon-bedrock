@@ -646,6 +646,11 @@ class PackageCommand(Command):
         if not go_src.exists():
             raise FileNotFoundError(f"Go source directory not found at {go_src}")
 
+        # Read version from VERSION file next to go.mod
+        version_file = go_src / "VERSION"
+        go_version = version_file.read_text().strip() if version_file.exists() else "dev"
+        self.line(f"  <info>Binary version: {go_version}</info>")
+
         # Verify Go is installed
         try:
             result = subprocess.run(["go", "version"], capture_output=True, text=True, check=True)
@@ -691,7 +696,8 @@ class PackageCommand(Command):
                 env = {**os.environ, "GOOS": goos, "GOARCH": goarch, "CGO_ENABLED": "0"}
                 # Windows: do NOT strip (-s -w). Defender cloud ML (Wacatac.B!ml)
                 # flags stripped Go binaries. .syso PE version-info files help further.
-                ldflags = "" if plat == "windows" else "-s -w"
+                version_flag = f"-X ccwb-go/internal/version.Version={go_version}"
+                ldflags = version_flag if plat == "windows" else f"-s -w {version_flag}"
                 cmd = [
                     "go", "build",
                     "-trimpath",

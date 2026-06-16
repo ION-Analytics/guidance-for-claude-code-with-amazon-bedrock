@@ -200,7 +200,8 @@ class DeployCommand(Command):
             if getattr(profile, "enable_codebuild", False):
                 stacks_to_deploy.append(("codebuild", "CodeBuild for Windows binary builds"))
 
-        # Initialize CloudFormation manager
+        # Initialize CloudFormation manager — use ambient shell credentials so that
+        # an admin SSO profile (e.g. svcsprod) in the environment is picked up correctly
         cf_manager = CloudFormationManager(region=profile.aws_region)
 
         # Show deployment plan
