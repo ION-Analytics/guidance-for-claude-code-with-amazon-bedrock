@@ -2,8 +2,15 @@
 
 package daemon
 
-import "os/exec"
+import (
+	"os/exec"
+	"syscall"
+)
+
+const detachedProcess = 0x00000008
 
 func detachProcess(cmd *exec.Cmd) {
-	// No-op on Windows — detachment handled differently; daemon spawn is best-effort.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | detachedProcess,
+	}
 }

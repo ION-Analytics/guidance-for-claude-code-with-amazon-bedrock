@@ -356,16 +356,26 @@ def lambda_handler(event, context):
             FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
             ProjectionExpression="email, total_tokens, daily_tokens, total_cost, daily_cost, daily_date",
         )
-        for item in response.get("Items", []):
+        stale_emails = []
+
+        def _parse_usage_item(item):
             email = item.get("email")
-            if email:
-                usage_data[email] = {
-                    "total_tokens": float(item.get("total_tokens", 0)),
-                    "daily_tokens": float(item.get("daily_tokens", 0)),
-                    "total_cost": float(item.get("total_cost", 0)),
-                    "daily_cost": float(item.get("daily_cost", 0)),
-                    "daily_date": item.get("daily_date"),
-                }
+            if not email:
+                return
+            daily_date = item.get("daily_date")
+            stale_daily = daily_date != current_date
+            if stale_daily and (float(item.get("daily_cost", 0)) > 0 or float(item.get("daily_tokens", 0)) > 0):
+                stale_emails.append(email)
+            usage_data[email] = {
+                "total_tokens": float(item.get("total_tokens", 0)),
+                "daily_tokens": 0.0 if stale_daily else float(item.get("daily_tokens", 0)),
+                "total_cost": float(item.get("total_cost", 0)),
+                "daily_cost": 0.0 if stale_daily else float(item.get("daily_cost", 0)),
+                "daily_date": daily_date,
+            }
+
+        for item in response.get("Items", []):
+            _parse_usage_item(item)
         while "LastEvaluatedKey" in response:
             response = quota_table.scan(
                 FilterExpression=Attr("sk").eq(f"MONTH#{current_month}") & Attr("pk").begins_with("USER#"),
@@ -373,15 +383,25 @@ def lambda_handler(event, context):
                 ExclusiveStartKey=response["LastEvaluatedKey"],
             )
             for item in response.get("Items", []):
-                email = item.get("email")
-                if email:
-                    usage_data[email] = {
-                        "total_tokens": float(item.get("total_tokens", 0)),
-                        "daily_tokens": float(item.get("daily_tokens", 0)),
-                        "total_cost": float(item.get("total_cost", 0)),
-                        "daily_cost": float(item.get("daily_cost", 0)),
-                        "daily_date": item.get("daily_date"),
-                    }
+                _parse_usage_item(item)
+
+        # Zero stale daily counters in DynamoDB so the dashboard and quota_check
+        # see correct values without waiting for a usage event to trigger a reset
+        for email in stale_emails:
+            try:
+                quota_table.update_item(
+                    Key={"pk": f"USER#{email}", "sk": f"MONTH#{current_month}"},
+                    UpdateExpression="SET daily_cost = :zero, daily_tokens = :zero_n, daily_date = :date",
+                    ExpressionAttributeValues={
+                        ":zero": Decimal("0"),
+                        ":zero_n": Decimal("0"),
+                        ":date": current_date,
+                    },
+                )
+            except Exception as e:
+                print(f"Error resetting daily counters for {email}: {e}")
+        if stale_emails:
+            print(f"Reset stale daily counters for {len(stale_emails)} users: {stale_emails}")
 
         if not usage_data:
             print("No usage data in DynamoDB")
