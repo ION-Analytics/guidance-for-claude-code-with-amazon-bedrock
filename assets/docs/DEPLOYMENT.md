@@ -108,7 +108,9 @@ On first cross-arch build, `ccwb` creates an isolated build environment at `~/.c
 
 Without universal2 Python: `--target-platform=all` skips the cross-arch target with a note and continues normally. Explicitly requesting the cross-arch target (e.g. `--target-platform=macos-intel` on Apple Silicon) fails with a clear error pointing to the python.org installer.
 
-This command performs several operations. First, it retrieves the Cognito Identity Pool ID from your deployed CloudFormation stack. Then it compiles the Python authentication code into standalone executables using PyInstaller for macOS/Linux and Nuitka for Windows. Your organization's configuration - provider domain, client ID, and infrastructure details - gets written to a config.json file that the executables read at runtime.
+This command performs several operations. First, it retrieves the Cognito Identity Pool ID from your deployed CloudFormation stack. Then it compiles the Python authentication code into standalone executables using PyInstaller for macOS/Linux and Nuitka for Windows, and builds the Go credential-process binary. Your organization's configuration - provider domain, client ID, and infrastructure details - gets written to a config.json file that the executables read at runtime.
+
+> **Binary versioning**: The Go credential-process binary version is read from `source/go/VERSION` and embedded at build time via ldflags. `ccwb package` reads this file automatically — no manual version flag is needed. Users can check the installed version with `~/claude-code-with-bedrock/credential-process --version`.
 
 The resulting `dist/` folder contains everything users need:
 
@@ -199,5 +201,6 @@ Regardless of distribution method, the user experience remains simple. They rece
 - Configures their AWS profile
 - Sets up the credential process
 - Handles all the complex authentication machinery invisibly
+- Registers an OS-level daemon watchdog: a launchd plist (`com.ionanalytics.claude-code-daemon.plist`) on macOS, or a Scheduled Task (`ClaudeCodeDaemon`) on Windows. The watchdog keeps the background daemon alive across reboots and crashes without any user action.
 
 When they run Claude Code with `AWS_PROFILE=ClaudeCode`, authentication happens automatically in the background. On first use, users will see a browser window open for authentication with your organization's identity provider.

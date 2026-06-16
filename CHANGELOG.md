@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-06-16
+
+### Added
+
+- **Go binary version number**: The credential-process Go binary now has a version number stored in `source/go/VERSION` (currently `1.0.0`). The version is embedded at build time via ldflags. `ccwb package` reads this file automatically. Users can check it with `~/claude-code-with-bedrock/credential-process --version`.
+- **Usage dashboard version display**: The usage dashboard now shows the client version (e.g. `v1.0.0`) next to each user's email address. The version is emitted as a `ClientVersion` CloudWatch metric (dimensions: `UserEmail`, `Version`) by the daemon on every heartbeat tick.
+- **OS-level daemon watchdog**: The install package now includes an OS-level watchdog that keeps the daemon alive independently of Claude Code invocations. On macOS, a launchd plist (`com.ionanalytics.claude-code-daemon.plist`) is installed with `KeepAlive=true`. On Windows, a Scheduled Task named `ClaudeCodeDaemon` runs at logon.
+
+### Changed
+
+- **Daemon fast startup**: Daemon now polls every 1 second after startup until credentials are cached, then starts otelcol immediately (previously up to 10s delay before otelcol launched).
+- **Daemon version beacon**: `ClientVersion` CloudWatch metric is now emitted on every heartbeat tick (not just at startup).
+- **otelcol proactive credential refresh**: Daemon now proactively restarts otelcol 5 minutes before collector credentials expire, forcing a fresh credential exchange first. This prevents 403 errors from stale in-memory credentials held by otelcol.
+- **Quota dashboard cost display**: Cost amounts on the usage dashboard are now shown to 2 decimal places.
+- **Quota dashboard colours**: Quota status colours are now green (0–80%), yellow (80–100%), and red (>100%).
+
+### Fixed
+
+- **Windows daemon heartbeats**: Fixed Windows daemon not sending heartbeats — the daemon was killed immediately because it was not properly detached as a separate process. Fixed by launching with `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`.
+- **Daily quota reset**: Stale `daily_cost` values in DynamoDB are now zeroed by the quota_monitor Lambda at UTC midnight, ensuring daily quota values reset correctly.
+- **QuotaPolicy enforcement mode fields**: `QuotaPolicy` now has separate `monthly_enforcement_mode` and `daily_enforcement_mode` fields (previously a single `enforcement_mode`). `ccwb quota usage` was crashing due to the old field name — now fixed.
+
 ## [2.4.0] - 2026-05-22 - OTLP-First Metrics
 
 ### Added

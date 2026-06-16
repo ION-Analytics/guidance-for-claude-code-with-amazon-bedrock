@@ -23,8 +23,9 @@ The quota monitoring system is an optional CloudFormation stack that tracks per-
 
 - **UserQuotaMetrics Table**: DynamoDB table storing monthly/daily usage totals with token type breakdown and cost
 - **QuotaPolicies Table**: DynamoDB table storing fine-grained quota policies (user/group/default) with token and cost limits
-- **Quota Monitor Lambda** (`quota_monitor`): Runs every 15 minutes — queries `bedrock-model-invocation` log group via CloudWatch Logs Insights, updates DynamoDB, checks thresholds, sends SNS alerts, and publishes CloudWatch metrics
+- **Quota Monitor Lambda** (`quota_monitor`): Runs every 15 minutes — queries `bedrock-model-invocation` log group via CloudWatch Logs Insights, updates DynamoDB, checks thresholds, sends SNS alerts, and publishes CloudWatch metrics. Also resets stale `daily_cost` values in DynamoDB at UTC midnight.
 - **Quota Check Lambda** (`quota_check`): Real-time check called at credential issuance time — validates token and cost usage against the effective policy
+- **Usage Dashboard**: Shows per-user quota status (daily %, monthly %, enforcement mode, policy tag) inline. Cost amounts are displayed to 2 decimal places. Quota colours indicate green (0–80%), yellow (80–100%), and red (>100%). The client version (e.g. `v1.0.0`) is displayed next to each user's email address, sourced from the `ClientVersion` CloudWatch metric emitted by the daemon.
 - **SNS Topic**: Alert delivery to administrators
 - **EventBridge Rule**: Lambda scheduling
 - **API Gateway**: Secured HTTP endpoint for real-time quota checks
@@ -494,6 +495,8 @@ aws dynamodb scan --table-name QuotaPolicies \
 - **Missing users**: Check JWT tokens include email claim
 - **Wrong policy applied**: Verify group claims are present in JWT tokens
 - **Groups not detected**: Check that `ENABLE_FINEGRAINED_QUOTAS` is set to `true`
+- **`ccwb quota usage` crashing**: Ensure you are on v3.1.0+. Earlier versions stored a single `enforcement_mode` field on `QuotaPolicy`; this has been split into `monthly_enforcement_mode` and `daily_enforcement_mode`. Re-deploy the quota stack and re-set any affected policies with `ccwb quota set-user`/`set-group`/`set-default`.
+- **Daily cost not resetting**: If `daily_cost` in DynamoDB appears stale after midnight, verify the quota_monitor Lambda executed successfully at or after UTC midnight — it is responsible for zeroing the daily cost counter.
 
 For detailed monitoring setup, see the [Monitoring Guide](MONITORING.md).
 
