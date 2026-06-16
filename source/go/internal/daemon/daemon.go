@@ -93,6 +93,20 @@ func Run(profile string, installDir string, cacheDir string) {
 		time.Sleep(3 * time.Second)
 	}
 
+	// If otelcol still not up (no creds yet), poll at 1s until it starts
+	if !otelcolRunning(collectorPidFile) {
+		fastTick := time.NewTicker(1 * time.Second)
+	fastLoop:
+		for range fastTick.C {
+			if d.credentialsCached() {
+				d.startOtelcol()
+				time.Sleep(1 * time.Second)
+				fastTick.Stop()
+				break fastLoop
+			}
+		}
+	}
+
 	lastCheck := time.Time{}
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()

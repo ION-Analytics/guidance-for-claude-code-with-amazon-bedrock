@@ -176,6 +176,8 @@ def heartbeats():
     cw = boto3.client("cloudwatch", region_name=REGION)
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(minutes=15)
+    # Version lookback is longer — a user might not have sent a beat in the last 15 min
+    version_window_start = now - timedelta(hours=24)
 
     # Collect all known users from both metric dimensions
     users = set()
@@ -192,7 +194,9 @@ def heartbeats():
                         if d["Name"] == dim_name and "@" in d["Value"]:
                             users.add(d["Value"].lower())
 
-        # ClientVersion metric carries both UserEmail and Version dimensions
+        # ClientVersion metric carries both UserEmail and Version dimensions.
+        # Collect every (email, version) pair seen historically.
+        version_candidates = []  # list of (email, version)
         paginator = cw.get_paginator("list_metrics")
         for page in paginator.paginate(Namespace="ClaudeCode/Security", MetricName="ClientVersion"):
             for m in page.get("Metrics", []):
@@ -200,19 +204,23 @@ def heartbeats():
                 email = dims.get("UserEmail", "").lower()
                 version = dims.get("Version", "")
                 if "@" in email and version:
-                    user_versions[email] = version
+                    version_candidates.append((email, version))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
     if not users:
         return jsonify({})
 
-    # Batch GetMetricData — max 500 queries per call; each user needs 2 queries
     result = {}
     user_list = sorted(users)
 
-    # Build metric data queries (2 per user: daemon + otelcol)
+    # Build GetMetricData queries:
+    #   - 2 per user for heartbeat dots (CollectorHeartbeat + OtelcolHeartbeat)
+    #   - 1 per (email, version) candidate to find the most recently active version
     queries = []
+    # Map from query id -> (email, version) for version candidates
+    version_query_map = {}
+
     for email in user_list:
         safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
         queries.append({
@@ -242,26 +250,93 @@ def heartbeats():
             "ReturnData": True,
         })
 
-    # GetMetricData accepts max 500 queries per call
+    for idx, (email, version) in enumerate(version_candidates):
+        safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:50]
+        # Sanitise version for use as a CW query Id (alphanumeric + underscore only)
+        vsafe = version.replace(".", "_").replace("-", "_")[:20]
+        qid = f"ver_{safe}_{vsafe}_{idx}"
+        version_query_map[qid] = (email, version)
+        queries.append({
+            "Id": qid,
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": "ClaudeCode/Security",
+                    "MetricName": "ClientVersion",
+                    "Dimensions": [
+                        {"Name": "UserEmail", "Value": email},
+                        {"Name": "Version", "Value": version},
+                    ],
+                },
+                "Period": 3600,
+                "Stat": "Sum",
+            },
+            "ReturnData": True,
+        })
+
+    # Split queries: heartbeat queries use 15-min window; version queries use 24h window
+    hb_queries = [q for q in queries if q["Id"].startswith("cw_") or q["Id"].startswith("otlp_")]
+    ver_queries = [q for q in queries if q["Id"].startswith("ver_")]
+
     try:
         BATCH = 500
         all_results = {}
-        for i in range(0, len(queries), BATCH):
+        for i in range(0, len(hb_queries), BATCH):
             resp = cw.get_metric_data(
-                MetricDataQueries=queries[i:i + BATCH],
+                MetricDataQueries=hb_queries[i:i + BATCH],
                 StartTime=window_start,
                 EndTime=now,
             )
             for r in resp.get("MetricDataResults", []):
-                all_results[r["Id"]] = any(v > 0 for v in r.get("Values", []))
+                vals = r.get("Values", [])
+                all_results[r["Id"]] = {"active": any(v > 0 for v in vals)}
+
+        for i in range(0, len(ver_queries), BATCH):
+            resp = cw.get_metric_data(
+                MetricDataQueries=ver_queries[i:i + BATCH],
+                StartTime=version_window_start,
+                EndTime=now,
+            )
+            for r in resp.get("MetricDataResults", []):
+                vals = r.get("Values", [])
+                timestamps = r.get("Timestamps", [])
+                all_results[r["Id"]] = {
+                    "active": any(v > 0 for v in vals),
+                    "latest_ts": max(timestamps) if timestamps else None,
+                }
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+    # Pick the best version per user: prefer any non-dev version; among ties pick
+    # the most recent timestamp; among equal timestamps pick highest semver-ish string.
+    for qid, (email, version) in version_query_map.items():
+        r = all_results.get(qid, {})
+        if not r.get("active"):
+            continue
+        ts = r.get("latest_ts")
+        existing = user_versions.get(email)
+        existing_ts = user_versions.get(email + "_ts")
+        if existing is None:
+            user_versions[email] = version
+            user_versions[email + "_ts"] = ts
+        else:
+            # Prefer non-dev over dev
+            existing_is_dev = existing == "dev"
+            candidate_is_dev = version == "dev"
+            if existing_is_dev and not candidate_is_dev:
+                user_versions[email] = version
+                user_versions[email + "_ts"] = ts
+            elif not existing_is_dev and not candidate_is_dev:
+                # Both real versions — pick most recent timestamp, then higher string
+                if ts and (existing_ts is None or ts >= existing_ts):
+                    if ts > existing_ts or version > existing:
+                        user_versions[email] = version
+                        user_versions[email + "_ts"] = ts
 
     for email in user_list:
         safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
         result[email] = {
-            "cw": all_results.get(f"cw_{safe}", False),
-            "otlp": all_results.get(f"otlp_{safe}", False),
+            "cw": all_results.get(f"cw_{safe}", {}).get("active", False),
+            "otlp": all_results.get(f"otlp_{safe}", {}).get("active", False),
             "version": user_versions.get(email, ""),
         }
 

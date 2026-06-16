@@ -213,7 +213,7 @@ def lambda_handler(event, context):
         return build_response(200, {
             "allowed": True,
             "reason": "within_quota",
-            "enforcement_mode": enforcement_mode,
+            "enforcement_mode": monthly_enforcement_mode,
             "usage": usage_summary,
             "policy": {
                 "type": policy.get("policy_type"),
