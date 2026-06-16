@@ -2366,6 +2366,47 @@ EOF
     echo "  ✓ Created collector profile '$COLLECTOR_PROFILE'"
 done
 
+# Install launchd agent on macOS to keep the credential daemon alive
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    echo
+    echo "Installing daemon watchdog (launchd)..."
+    PLIST_DIR="$HOME/Library/LaunchAgents"
+    mkdir -p "$PLIST_DIR"
+    FIRST_PROFILE=$(echo $PROFILES | awk '{{print $1}}')
+    PLIST_PATH="$PLIST_DIR/com.ionanalytics.claude-code-daemon.plist"
+    cat > "$PLIST_PATH" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ionanalytics.claude-code-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HOME/claude-code-with-bedrock/credential-process</string>
+        <string>--daemon</string>
+        <string>--profile</string>
+        <string>$FIRST_PROFILE</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/.claude-code-session/daemon-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/.claude-code-session/daemon-launchd.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+PLIST
+    # Unload any previous version then load the new one
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchctl load "$PLIST_PATH"
+    echo "✓ Daemon watchdog installed (launchd will restart it automatically)"
+fi
+
 # Apply CoWork configuration profile on macOS if present
 if [[ "$OSTYPE" == "darwin"* ]] && [ -f "cowork-3p.mobileconfig" ]; then
     echo
@@ -2523,6 +2564,20 @@ if %errorlevel% neq 0 (
     echo ERROR: Failed to configure AWS profiles
     pause
     exit /b 1
+)
+
+REM Install Scheduled Task to keep the credential daemon alive
+echo.
+echo Installing daemon watchdog (Scheduled Task)...
+for /f %%p in ('powershell -NoProfile -Command "(Get-Content config.json | ConvertFrom-Json).PSObject.Properties.Name | Select-Object -First 1"') do set FIRST_PROFILE=%%p
+schtasks /delete /tn "ClaudeCodeDaemon" /f >nul 2>&1
+schtasks /create /tn "ClaudeCodeDaemon" /tr "\"%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe\" --daemon --profile %FIRST_PROFILE%" /sc onlogon /ru "%USERNAME%" /f >nul
+if %errorlevel% neq 0 (
+    echo WARNING: Could not install Scheduled Task for daemon watchdog
+) else (
+    echo OK Daemon watchdog installed (Scheduled Task will restart it on logon)
+    REM Start it immediately too
+    schtasks /run /tn "ClaudeCodeDaemon" >nul 2>&1
 )
 
 echo.

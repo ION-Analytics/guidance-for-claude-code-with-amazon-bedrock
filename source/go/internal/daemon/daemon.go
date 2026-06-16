@@ -101,6 +101,17 @@ func Run(profile string, installDir string, cacheDir string) {
 			d.startOtelcol()
 		}
 
+		// Proactive restart: if collector credentials expire within 5 minutes,
+		// force a credential refresh then restart otelcol with fresh creds.
+		if otelcolRunning(collectorPidFile) && d.collectorCredsExpiringSoon() {
+			logger.infof("collector credentials expiring soon, forcing refresh and restarting otelcol")
+			cp := filepath.Join(d.installDir, "credential-process")
+			_ = exec.Command(cp, "--profile", d.profile, "--clear-cache").Run()
+			d.writeCollectorCredentials()
+			stopOtelcol(collectorPidFile, logger)
+			d.startOtelcol()
+		}
+
 		now := time.Now()
 		if now.Sub(lastCheck) < interval {
 			continue
@@ -198,6 +209,26 @@ func (d *daemonState) collectorCredentialsValid() bool {
 
 func (d *daemonState) stsValid() bool {
 	return d.credentialsCached() && d.collectorCredentialsValid()
+}
+
+func (d *daemonState) collectorCredsExpiringSoon() bool {
+	creds, err := readCredentials(d.profile + "-collector")
+	if err != nil || creds == nil {
+		return false
+	}
+	if creds.expiration == "" {
+		return false
+	}
+	exp := creds.expiration
+	exp = strings.ReplaceAll(exp, "Z", "+00:00")
+	t, err := time.Parse(time.RFC3339, exp)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05+00:00", exp)
+		if err != nil {
+			return false
+		}
+	}
+	return time.Until(t) < 5*time.Minute
 }
 
 func (d *daemonState) readEmail() string {
