@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"gopkg.in/ini.v1"
+
+	"ccwb-go/internal/version"
 )
 
 const (
@@ -371,6 +373,11 @@ func (d *daemonState) sendHeartbeat(email string, otelcolUp bool) {
 	if otelcolUp {
 		d.sendCloudWatchMetric(email, "OtelcolHeartbeat", "UserEmail")
 	}
+	// Version beacon — emitted once per heartbeat cycle so the dashboard can read it
+	d.sendCloudWatchMetricWithDims(email, "ClientVersion", map[string]string{
+		"UserEmail": email,
+		"Version":   version.Version,
+	})
 }
 
 func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimName string) {
@@ -460,6 +467,123 @@ func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimN
 		"Host":                 host,
 		"X-Amz-Date":          amzDate,
 		"Authorization":       authHeader,
+	}
+	if creds.sessionToken != "" {
+		reqHeaders["X-Amz-Security-Token"] = creds.sessionToken
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, strings.NewReader(bodyStr))
+	if err != nil {
+		d.logger.warnf("direct CW heartbeat request build failed: %v", err)
+		return
+	}
+	for k, v := range reqHeaders {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		d.logger.warnf("direct CW heartbeat failed: %v", err)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	d.logger.infof("CW %s sent for %s status=%d", metricName, email, resp.StatusCode)
+}
+
+func (d *daemonState) sendCloudWatchMetricWithDims(email string, metricName string, dims map[string]string) {
+	creds, err := readCredentials(d.profile)
+	if err != nil || creds == nil || isExpiredPlaceholder(creds) {
+		d.logger.warnf("credentials unavailable for direct CW heartbeat")
+		return
+	}
+
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = "eu-west-1"
+	}
+
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	host := "monitoring." + region + ".amazonaws.com"
+	endpoint := "https://" + host + "/"
+
+	body := url.Values{}
+	body.Set("Action", "PutMetricData")
+	body.Set("Version", "2010-08-01")
+	body.Set("Namespace", cwNamespace)
+	body.Set("MetricData.member.1.MetricName", metricName)
+	body.Set("MetricData.member.1.Value", "1.0")
+	body.Set("MetricData.member.1.Unit", "Count")
+
+	// Sort dim keys so the body encoding is deterministic (required for SigV4)
+	dimKeys := make([]string, 0, len(dims))
+	for k := range dims {
+		dimKeys = append(dimKeys, k)
+	}
+	sortStrings(dimKeys)
+	for i, k := range dimKeys {
+		n := fmt.Sprintf("%d", i+1)
+		body.Set("MetricData.member.1.Dimensions.member."+n+".Name", k)
+		body.Set("MetricData.member.1.Dimensions.member."+n+".Value", dims[k])
+	}
+	bodyStr := body.Encode()
+
+	payloadHash := sha256Hex(bodyStr)
+	headersToSign := map[string]string{
+		"content-type":        "application/x-www-form-urlencoded",
+		"host":                host,
+		"x-amz-date":         amzDate,
+	}
+	if creds.sessionToken != "" {
+		headersToSign["x-amz-security-token"] = creds.sessionToken
+	}
+
+	var headerKeys []string
+	for k := range headersToSign {
+		headerKeys = append(headerKeys, k)
+	}
+	sortStrings(headerKeys)
+	var canonicalHeaders strings.Builder
+	for _, k := range headerKeys {
+		canonicalHeaders.WriteString(k + ":" + headersToSign[k] + "\n")
+	}
+	signedHeaders := strings.Join(headerKeys, ";")
+	canonicalRequest := strings.Join([]string{
+		"POST", "/", "",
+		canonicalHeaders.String(), signedHeaders, payloadHash,
+	}, "\n")
+
+	credentialScope := dateStamp + "/" + region + "/monitoring/aws4_request"
+	stringToSign := strings.Join([]string{
+		"AWS4-HMAC-SHA256", amzDate, credentialScope,
+		sha256Hex(canonicalRequest),
+	}, "\n")
+
+	signingKey := hmacSHA256(
+		hmacSHA256(
+			hmacSHA256(
+				hmacSHA256([]byte("AWS4"+creds.secretAccessKey), dateStamp),
+				region,
+			),
+			"monitoring",
+		),
+		"aws4_request",
+	)
+	mac := hmac.New(sha256.New, signingKey)
+	mac.Write([]byte(stringToSign))
+	signature := fmt.Sprintf("%x", mac.Sum(nil))
+
+	authHeader := fmt.Sprintf(
+		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		creds.accessKeyID, credentialScope, signedHeaders, signature,
+	)
+
+	reqHeaders := map[string]string{
+		"Content-Type":        "application/x-www-form-urlencoded",
+		"Host":                host,
+		"X-Amz-Date":         amzDate,
+		"Authorization":      authHeader,
 	}
 	if creds.sessionToken != "" {
 		reqHeaders["X-Amz-Security-Token"] = creds.sessionToken

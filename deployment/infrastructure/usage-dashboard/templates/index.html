@@ -71,7 +71,7 @@
     let prevDays = 0;
     let timer = null;
     const REFRESH_MS = 30000;
-    let heartbeats = {};  // {email: {cw: bool, otlp: bool}}
+    let heartbeats = {};  // {email: {cw: bool, otlp: bool, version: str}}
     let quotas = {};      // {email: {daily_pct, daily_label, daily_enforcement, monthly_pct, monthly_label, monthly_enforcement}}
 
     function changeDays(val) {
@@ -99,6 +99,13 @@
         '<span class="hb-dot ' + cwCls  + '" title="credential-process running (last 15 min)"></span>' +
         '<span class="hb-dot ' + otlpCls + '" title="otelcol running (last 15 min)"></span>' +
         '</span>';
+    }
+
+    function versionTag(email) {
+      const hb = heartbeats[email];
+      const v = hb && hb.version ? hb.version : '';
+      if (!v) return '';
+      return '<span style="font-size:0.7em;color:#8b949e;margin-left:6px;font-weight:400;">v' + v + '</span>';
     }
 
     async function loadHeartbeats() {
@@ -199,7 +206,7 @@
 
           let emailCell = '';
           if (isFirst) {
-            emailCell = r.email + (prevDays === 0 ? hbDots(r.email) : '');
+            emailCell = r.email + (prevDays === 0 ? versionTag(r.email) + hbDots(r.email) : '');
           } else if (isSecond && multiModel && prevDays === 0) {
             emailCell = quotaStatusHtml(r.email);
           }

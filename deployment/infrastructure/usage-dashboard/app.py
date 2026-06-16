@@ -179,6 +179,7 @@ def heartbeats():
 
     # Collect all known users from both metric dimensions
     users = set()
+    user_versions = {}  # email -> version string from ClientVersion metric
     try:
         for namespace, metric_name, dim_name in [
             ("ClaudeCode/Security", "CollectorHeartbeat", "UserEmail"),
@@ -190,6 +191,16 @@ def heartbeats():
                     for d in m.get("Dimensions", []):
                         if d["Name"] == dim_name and "@" in d["Value"]:
                             users.add(d["Value"].lower())
+
+        # ClientVersion metric carries both UserEmail and Version dimensions
+        paginator = cw.get_paginator("list_metrics")
+        for page in paginator.paginate(Namespace="ClaudeCode/Security", MetricName="ClientVersion"):
+            for m in page.get("Metrics", []):
+                dims = {d["Name"]: d["Value"] for d in m.get("Dimensions", [])}
+                email = dims.get("UserEmail", "").lower()
+                version = dims.get("Version", "")
+                if "@" in email and version:
+                    user_versions[email] = version
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -251,6 +262,7 @@ def heartbeats():
         result[email] = {
             "cw": all_results.get(f"cw_{safe}", False),
             "otlp": all_results.get(f"otlp_{safe}", False),
+            "version": user_versions.get(email, ""),
         }
 
     return jsonify(result)
