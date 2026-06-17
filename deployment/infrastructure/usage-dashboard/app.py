@@ -89,6 +89,16 @@ def _day_window(prev_days):
     return int(target.timestamp()), int((target + timedelta(days=1)).timestamp()), target.strftime("%Y-%m-%d")
 
 
+def _period_window(period):
+    now = datetime.now(timezone.utc)
+    if period == "week":
+        start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return int(start.timestamp()), int(now.timestamp()), "Last 7 days"
+    # month
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp()), int(now.timestamp()), now.strftime("%B %Y") + " MTD"
+
+
 def _run_cw_query(start_time, end_time):
     """Run the Bedrock usage CW Logs query and return {email: total_cost}."""
     logs = boto3.client("logs", region_name=REGION)
@@ -133,8 +143,11 @@ def _run_cw_query(start_time, end_time):
     return costs, rows, None
 
 
-def run_query(prev_days=0):
-    start_time, end_time, date_label = _day_window(prev_days)
+def run_query(prev_days=0, period=None):
+    if period in ("week", "month"):
+        start_time, end_time, date_label = _period_window(period)
+    else:
+        start_time, end_time, date_label = _day_window(prev_days)
     costs, rows, err = _run_cw_query(start_time, end_time)
     if err:
         return None, err, date_label
@@ -154,8 +167,9 @@ def index():
 
 @app.route("/api/usage")
 def usage():
+    period = request.args.get("period")
     prev_days = abs(int(request.args.get("prev_days", 0)))
-    rows, error, date_label = run_query(prev_days)
+    rows, error, date_label = run_query(prev_days=prev_days, period=period)
     queried_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     if error:
         return jsonify({"error": error, "date_label": date_label, "queried_at": queried_at}), 500

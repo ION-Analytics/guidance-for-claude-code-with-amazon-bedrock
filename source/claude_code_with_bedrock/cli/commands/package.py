@@ -2379,7 +2379,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     PLIST_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$PLIST_DIR"
     FIRST_PROFILE=$(echo $PROFILES | awk '{{print $1}}')
-    PLIST_PATH="$PLIST_DIR/com.ionanalytics.claude-code-daemon.plist"
+    PLIST_LABEL="com.ionanalytics.claude-code-daemon"
+    PLIST_PATH="$PLIST_DIR/$PLIST_LABEL.plist"
     cat > "$PLIST_PATH" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2407,9 +2408,25 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 </dict>
 </plist>
 PLIST
-    # Unload any previous version then load the new one
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
-    launchctl load "$PLIST_PATH"
+    # Kill any running daemon process before reloading launchd job.
+    # Required on reinstall: launchd's KeepAlive restarts the daemon immediately
+    # after the cleanup kill, but if the binary was deleted the job enters a
+    # throttled/error state. unload then silently fails, so the new plist never
+    # takes effect without a reboot. Force-killing first drains the backoff state.
+    if [ -f ~/claude-code-with-bedrock/daemon.pid ]; then
+        kill "$(cat ~/claude-code-with-bedrock/daemon.pid)" 2>/dev/null || true
+        rm -f ~/claude-code-with-bedrock/daemon.pid
+    fi
+    # Use bootout/bootstrap (modern API) with unload/load fallback for older macOS
+    LAUNCH_DOMAIN="gui/$(id -u)"
+    if launchctl bootout "$LAUNCH_DOMAIN/$PLIST_LABEL" 2>/dev/null; then
+        sleep 1
+    else
+        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    fi
+    if ! launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
+        launchctl load "$PLIST_PATH" 2>/dev/null || true
+    fi
     echo "✓ Daemon watchdog installed (launchd will restart it automatically)"
 fi
 

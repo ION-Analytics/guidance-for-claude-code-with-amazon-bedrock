@@ -330,7 +330,7 @@ func (d *daemonState) writeCollectorCredentials() {
 }
 
 func (d *daemonState) startOtelcol() {
-	otelcol := filepath.Join(d.installDir, "otelcol")
+	otelcol := filepath.Join(d.installDir, otelcolBinary())
 	config := filepath.Join(d.installDir, "collector-config.yaml")
 	if _, err := os.Stat(otelcol); os.IsNotExist(err) {
 		d.logger.infof("otelcol binary not found, skipping")

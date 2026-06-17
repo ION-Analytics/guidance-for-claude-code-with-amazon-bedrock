@@ -48,37 +48,61 @@
     tfoot td { padding: 8px 12px; text-align: right; border-top: 2px solid #30363d; color: #c9d1d9; font-weight: 600; background: #161b22; }
     tfoot td:first-child { text-align: left; }
     .empty { padding: 40px; text-align: center; color: #8b949e; }
+    .key { font-size: 10px; color: #8b949e; padding: 6px 20px; background: #161b22; border-bottom: 1px solid #30363d; display: flex; gap: 20px; flex-wrap: wrap; }
+    .key-item { white-space: nowrap; }
+    .key-item b { color: #c9d1d9; }
   </style>
 </head>
 <body>
   <header>
     <h1>Bedrock Usage</h1>
     <div class="controls">
-      <select id="daySelect" onchange="changeDays(this.value)">
-        <option value="0">Today</option>
-        <option value="1">Yesterday</option>
-        <option value="2">2 days ago</option>
-        <option value="3">3 days ago</option>
-        <option value="7">7 days ago</option>
+      <select id="daySelect" onchange="changeWindow(this.value)">
+        <option value="day:0">Today</option>
+        <option value="day:1">Yesterday</option>
+        <option value="day:2">2 days ago</option>
+        <option value="day:3">3 days ago</option>
+        <option value="day:7">7 days ago</option>
+        <option value="period:week">Last 7 days</option>
+        <option value="period:month">This month (MTD)</option>
       </select>
       <span id="badge" class="badge live">● live</span>
     </div>
     <div class="meta" id="meta">Loading…</div>
   </header>
+  <div class="key">
+    <span class="key-item"><b>D</b> Daily quota %</span>
+    <span class="key-item"><b>M</b> Monthly quota %</span>
+    <span class="key-item"><b>(A)</b> Alert — warned but not blocked</span>
+    <span class="key-item"><b>(B)</b> Block — credentials denied at limit</span>
+    <span class="key-item"><b>Def</b> Default org-wide policy</span>
+    <span class="key-item"><b>Ind</b> Individual policy override</span>
+    <span class="key-item"><span class="hb-dot green" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;vertical-align:middle;"></span> credential-process seen &lt;15 min</span>
+    <span class="key-item"><span class="hb-dot red" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f85149;vertical-align:middle;"></span> credential-process not seen</span>
+    <span class="key-item">2nd dot = otelcol status</span>
+  </div>
   <div id="content"><div class="empty">Loading…</div></div>
 
   <script>
-    let prevDays = 0;
+    let currentWindow = 'day:0';  // 'day:N' or 'period:week' / 'period:month'
     let timer = null;
     const REFRESH_MS = 30000;
     let heartbeats = {};  // {email: {cw: bool, otlp: bool, version: str}}
     let quotas = {};      // {email: {daily_pct, daily_label, daily_enforcement, monthly_pct, monthly_label, monthly_enforcement}}
 
-    function changeDays(val) {
-      prevDays = parseInt(val, 10);
+    function isToday() { return currentWindow === 'day:0'; }
+
+    function usageUrl() {
+      const [type, val] = currentWindow.split(':');
+      if (type === 'period') return '/api/usage?period=' + val;
+      return '/api/usage?prev_days=' + val;
+    }
+
+    function changeWindow(val) {
+      currentWindow = val;
       clearInterval(timer);
       load();
-      if (prevDays === 0) timer = setInterval(load, REFRESH_MS);
+      if (isToday()) timer = setInterval(load, REFRESH_MS);
     }
 
     function fmt(n) { return n.toLocaleString(); }
@@ -161,19 +185,20 @@
 
     async function load() {
       const badge = document.getElementById('badge');
-      badge.innerHTML = prevDays === 0 ? '<span class="spinner"></span> live' : '● hist';
-      badge.className = 'badge ' + (prevDays === 0 ? 'live' : 'hist');
+      badge.innerHTML = isToday() ? '<span class="spinner"></span> live' : '● hist';
+      badge.className = 'badge ' + (isToday() ? 'live' : 'hist');
 
       // Fetch usage, heartbeats, and quotas in parallel; heartbeats/quotas only for today
-      const fetchUsage = fetch('/api/usage?prev_days=' + prevDays).then(r => r.json());
-      const fetchHb = prevDays === 0 ? loadHeartbeats() : Promise.resolve();
-      const fetchQuotas = prevDays === 0 ? loadQuotas() : Promise.resolve();
+      const fetchUsage = fetch(usageUrl()).then(r => r.json());
+      const fetchHb = isToday() ? loadHeartbeats() : Promise.resolve();
+      const fetchQuotas = isToday() ? loadQuotas() : Promise.resolve();
 
       try {
         const [data] = await Promise.all([fetchUsage, fetchHb, fetchQuotas]);
+        const [wtype] = currentWindow.split(':');
+        const suffix = isToday() ? ' from midnight UTC' : wtype === 'period' ? '' : ' full day UTC';
         document.getElementById('meta').textContent =
-          data.date_label + (prevDays === 0 ? ' from midnight UTC' : ' full day UTC') +
-          '  |  queried at ' + data.queried_at;
+          data.date_label + suffix + '  |  queried at ' + data.queried_at;
 
         if (data.error) {
           document.getElementById('content').innerHTML = '<div class="error">Error: ' + data.error + '</div>';
@@ -206,8 +231,8 @@
 
           let emailCell = '';
           if (isFirst) {
-            emailCell = r.email + (prevDays === 0 ? versionTag(r.email) + hbDots(r.email) : '');
-          } else if (isSecond && multiModel && prevDays === 0) {
+            emailCell = r.email + (isToday() ? versionTag(r.email) + hbDots(r.email) : '');
+          } else if (isSecond && multiModel && isToday()) {
             emailCell = quotaStatusHtml(r.email);
           }
 
@@ -223,7 +248,7 @@
           html += '<td class="user-total">' + (isFirst ? fmtCost(r.user_total) : '') + '</td>';
           html += '</tr>';
           // Only use a dedicated quota row when the user has a single model
-          if (isFirst && !multiModel && prevDays === 0) html += quotaRow(r.email, 9);
+          if (isFirst && !multiModel && isToday()) html += quotaRow(r.email, 9);
           totCalls += r.calls;
           totInp += r.input_tokens;
           totOut += r.output_tokens;
@@ -244,11 +269,11 @@
         document.getElementById('content').innerHTML = '<div class="error">Failed to fetch: ' + e.message + '</div>';
       }
 
-      badge.innerHTML = prevDays === 0 ? '● live' : '● hist';
+      badge.innerHTML = isToday() ? '● live' : '● hist';
     }
 
     load();
-    if (prevDays === 0) timer = setInterval(load, REFRESH_MS);
+    if (isToday()) timer = setInterval(load, REFRESH_MS);
   </script>
 </body>
 </html>
