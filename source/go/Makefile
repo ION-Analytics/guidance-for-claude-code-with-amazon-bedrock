@@ -3,7 +3,9 @@ LDFLAGS := -s -w -X ccwb-go/internal/version.Version=$(VERSION)
 # Windows: do NOT strip (-s -w). Defender cloud ML (Wacatac.B!ml) flags
 # stripped Go binaries and blocks them in subprocess/non-interactive contexts.
 # The .syso PE version-info files help but are not sufficient alone.
-LDFLAGS_WIN := -X ccwb-go/internal/version.Version=$(VERSION)
+# Use -H windowsgui to prevent console window flashing when credential-process
+# is invoked by AWS SDK on every API call. stderr/stdout still work if needed.
+LDFLAGS_WIN := -H windowsgui -X ccwb-go/internal/version.Version=$(VERSION)
 OUT ?= bin
 
 .PHONY: all test clean fmt vet macos-arm64 macos-intel linux-x64 linux-arm64 windows

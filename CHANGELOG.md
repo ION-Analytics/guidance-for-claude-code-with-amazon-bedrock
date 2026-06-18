@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows console window flashing**: Fixed credential-process.exe and otel-helper.exe spawning visible console windows on every AWS API call. The AWS SDK invokes credential_process frequently to check credential expiration, causing dozens of CMD windows to flash during Claude Code sessions. Binaries are now built with `-H windowsgui` ldflags (GUI subsystem) to suppress console windows while preserving stdout/stderr for credential output and error messages.
+
 ## [3.1.0] - 2026-06-16
 
 ### Added
