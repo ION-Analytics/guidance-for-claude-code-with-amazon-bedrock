@@ -15,7 +15,6 @@ import (
 	"ccwb-go/internal/federation"
 	"ccwb-go/internal/jwt"
 	"ccwb-go/internal/oidc"
-	"ccwb-go/internal/otel"
 	"ccwb-go/internal/portlock"
 	"ccwb-go/internal/provider"
 	"ccwb-go/internal/quota"
@@ -358,7 +357,7 @@ func (a *credentialApp) showTags() int {
 	if costTagKey == "" {
 		costTagKey = "Project"
 	}
-	if p := otel.ExtractPrincipalTag(claims, costTagKey); p != "" {
+	if p := jwt.ExtractPrincipalTag(claims, costTagKey); p != "" {
 		summary[fmt.Sprintf("%s (resolved)", costTagKey)] = p
 	}
 	pretty, err := json.MarshalIndent(summary, "", "  ")
@@ -394,7 +393,7 @@ func (a *credentialApp) getTag(key string) int {
 	if exp := claims.GetFloat("exp"); exp > 0 && int64(exp) < time.Now().Unix() {
 		return 4
 	}
-	value := otel.ExtractPrincipalTag(claims, key)
+	value := jwt.ExtractPrincipalTag(claims, key)
 	if value == "" {
 		return 2
 	}

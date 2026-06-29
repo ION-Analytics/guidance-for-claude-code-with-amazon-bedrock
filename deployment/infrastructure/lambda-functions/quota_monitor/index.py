@@ -736,7 +736,7 @@ def send_alerts(alerts):
                     f"Date:    {alert.get('date', '')}",
                     "",
                     "The user has active Bedrock usage this period but their credential daemon is not",
-                    "sending a heartbeat. This may indicate the otelcol sidecar has been stopped.",
+                    "sending a heartbeat. This may indicate the credential daemon has been stopped.",
                     "Token and cost quotas are unaffected (enforced via server-side Bedrock logs).",
                     "OTEL dashboard visibility for this user is degraded.",
                 ]

@@ -108,7 +108,7 @@ During packaging, PyInstaller compiles the Python credential process into platfo
 
 The package embeds the configuration created during deployment, including the Cognito Identity Pool ID retrieved from CloudFormation outputs. This eliminates any manual configuration for end users. The installer script detects the user's platform, copies the appropriate binary, creates the AWS CLI profile configuration, and sets up the credential process integration.
 
-For organizations with monitoring enabled, the package also includes the OTEL helper executable and Claude Code settings. This provides a complete solution from authentication through telemetry without requiring users to understand the underlying complexity.
+For organizations with monitoring enabled, the package includes Claude Code settings pre-configured with the OTLP endpoint. This provides a complete solution from authentication through telemetry without requiring users to understand the underlying complexity.
 
 ## Configuration Architecture
 
@@ -129,7 +129,6 @@ For organizations with monitoring enabled, the package also includes the OTEL he
 3. **Claude Code Settings** (`~/.claude/settings.json`)
    - Generated during package build
    - Contains OTEL endpoint and environment variables
-   - Includes path to OTEL helper executable
 
 ## Security Architecture
 

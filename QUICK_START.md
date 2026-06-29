@@ -692,13 +692,11 @@ The `dist/` folder will contain:
 - `install.bat` - Installation script for Windows
 - `README.md` - User instructions
 - `.claude/settings.json` - Claude Code telemetry settings (if monitoring enabled)
-- `otel-helper-*` - OTEL helper executables for each platform (if monitoring enabled)
 
 The package builder:
 
 - Automatically builds binaries for both macOS and Linux by default
 - Uses Docker to cross-compile Linux binaries when running on macOS — **Docker Desktop must be installed and running**; if not present, Linux builds are skipped with a warning and macOS/Windows builds continue unaffected
-- Includes the OTEL helper for extracting user attributes from JWT tokens
 - Creates a unified installer that auto-detects the user's platform
 
 ### Step 5: Test the Setup
@@ -778,7 +776,7 @@ See [Distribution Comparison](assets/docs/distribution/comparison.md) for detail
 
 ### Build Requirements
 
-- **Go 1.23+** (optional): Required for building the OpenTelemetry collector sidecar binary. If not installed, the sidecar build is skipped and packages are created without it. Install from https://go.dev/dl/
+- **Go 1.23+** (required): Used to cross-compile the `credential-process` binary for all platforms. Install from https://go.dev/dl/
 - **Windows**: AWS CodeBuild with Nuitka (automated)
 - **macOS**: PyInstaller with architecture-specific builds
   - ARM64: Native build on Apple Silicon Macs only — cannot run on Intel Macs
@@ -928,39 +926,6 @@ poetry run ccwb package --target-platform all
 Redistribute the new package. The installer auto-detects architecture and installs the correct binary.
 
 > **Why this happens:** Without a universal2 Python, `ccwb package` builds only for the host Mac's architecture. An ARM64-only package has no Intel binary, so Intel Mac users get `exec format error` — ARM64 binaries cannot run on Intel Macs. Install a universal2 Python to also build the Intel binary, which covers all Mac users.
-
-### Windows `install.bat` — `-replace was unexpected at this time.`
-
-If running `install.bat` on Windows produces this error:
-
-```
--replace was unexpected at this time.
-```
-
-**Root cause:** This is a cmd.exe parser bug in the generated installer — `^` line-continuation characters inside a double-quoted PowerShell command get consumed by cmd.exe, causing `-replace` to be treated as a standalone batch command rather than part of the PowerShell string. A code fix is included in the next release.
-
-**Workaround:** The binary and `config.json` are already copied before this error occurs — only the `~/.claude/settings.json` placeholder replacement fails. Complete the installation manually:
-
-**Step 1** — Open **PowerShell** (not cmd.exe) from the extracted package folder and run:
-
-```powershell
-$otelPath = "$env:USERPROFILE\claude-code-with-bedrock\otel-helper.exe" -replace '\\', '/'
-$credPath = "$env:USERPROFILE\claude-code-with-bedrock\credential-process.exe" -replace '\\', '/'
-(Get-Content 'claude-settings\settings.json') `
-    -replace '__OTEL_HELPER_PATH__', $otelPath `
-    -replace '__CREDENTIAL_PROCESS_PATH__', $credPath |
-    Set-Content "$env:USERPROFILE\.claude\settings.json"
-```
-
-**Step 2** — Configure the AWS profile (replace `<profile-name>` with the name shown in `config.json`):
-
-```powershell
-aws configure set credential_process `
-    "$env:USERPROFILE\claude-code-with-bedrock\credential-process.exe --profile <profile-name>" `
-    --profile <profile-name>
-```
-
-> **Why PowerShell works:** PowerShell uses backtick (`` ` ``) for line continuation — there is no cmd.exe parser involved to mangle the `-replace` operators.
 
 ### Build Failures
 

@@ -117,7 +117,7 @@ The resulting `dist/` folder contains everything users need:
 - Platform-specific executables (`credential-process-<platform>`) handle the OAuth2 authentication flow
 - The configuration file includes all necessary settings
 - Intelligent installer scripts (`install.sh` for Unix, `install.bat` for Windows) detect the user's architecture and set up their AWS profile automatically
-- If you enabled monitoring, OTEL helper executables and Claude Code telemetry settings that point to your OpenTelemetry collector
+- If you enabled monitoring, Claude Code telemetry settings pre-configured with your OpenTelemetry collector endpoint
 
 ### Windows Build System (Optional)
 

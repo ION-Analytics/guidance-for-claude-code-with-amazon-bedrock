@@ -493,9 +493,6 @@ class DistributeCommand(Command):
         platform_files = {
             "windows": [
                 ("credential-process-windows.exe", "credential-process-windows.exe"),
-                ("otel-helper-windows.exe", "otel-helper-windows.exe"),
-                ("otelcol-windows.exe", "otelcol-windows.exe"),
-                ("collector-config.yaml", "collector-config.yaml"),
                 ("install.bat", "install.bat"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
@@ -505,12 +502,6 @@ class DistributeCommand(Command):
             "linux": [
                 ("credential-process-linux-x64", "credential-process-linux-x64"),
                 ("credential-process-linux-arm64", "credential-process-linux-arm64"),
-                ("otel-helper-linux-x64", "otel-helper-linux-x64"),
-                ("otel-helper-linux-arm64", "otel-helper-linux-arm64"),
-                ("otelcol-linux-x64", "otelcol-linux-x64"),
-                ("otelcol-linux-arm64", "otelcol-linux-arm64"),
-                ("otel-helper.sh", "otel-helper.sh"),
-                ("collector-config.yaml", "collector-config.yaml"),
                 ("install.sh", "install.sh"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
@@ -519,12 +510,6 @@ class DistributeCommand(Command):
             "mac": [
                 ("credential-process-macos-arm64", "credential-process-macos-arm64"),
                 ("credential-process-macos-intel", "credential-process-macos-intel"),
-                ("otel-helper-macos-arm64", "otel-helper-macos-arm64"),
-                ("otel-helper-macos-intel", "otel-helper-macos-intel"),
-                ("otelcol-macos-arm64", "otelcol-macos-arm64"),
-                ("otelcol-macos-intel", "otelcol-macos-intel"),
-                ("otel-helper.sh", "otel-helper.sh"),
-                ("collector-config.yaml", "collector-config.yaml"),
                 ("install.sh", "install.sh"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
@@ -540,7 +525,7 @@ class DistributeCommand(Command):
             has_platform = False
             for source_file, _ in files:
                 # Check if this is an executable (contains these strings, not just ends with them)
-                if source_file.endswith(".exe") or "credential-process" in source_file or "otel-helper" in source_file:
+                if source_file.endswith(".exe") or "credential-process" in source_file:
                     if (package_path / source_file).exists():
                         has_platform = True
                         break
@@ -1136,20 +1121,6 @@ class DistributeCommand(Command):
             "credential-process-linux-x64",
             "credential-process-linux-arm64",
             "credential-process-windows.exe",
-            # OTEL helpers
-            "otel-helper-macos-arm64",
-            "otel-helper-macos-intel",
-            "otel-helper-linux-x64",
-            "otel-helper-linux-arm64",
-            "otel-helper-windows.exe",
-            "otel-helper.sh",
-            # OTEL Collector sidecar
-            "otelcol-macos-arm64",
-            "otelcol-macos-intel",
-            "otelcol-linux-x64",
-            "otelcol-linux-arm64",
-            "otelcol-windows.exe",
-            "collector-config.yaml",
             # Installation scripts
             "install.sh",
             "install.bat",

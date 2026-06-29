@@ -84,21 +84,13 @@ The quota check Lambda provides real-time allow/block decisions by reading the D
 
 > **Detailed Information**: See the [Quota Monitoring Guide](QUOTA_MONITORING.md).
 
-## Sidecar Daemon (Sidecar Mode)
+## Credential Daemon
 
-In sidecar mode the credential-process binary runs a background daemon that manages the local OTel collector (otelcol) and emits CloudWatch metrics on behalf of the user.
+The credential-process binary runs a background daemon that emits CloudWatch heartbeat metrics on behalf of the user.
 
 ### Version Beacon
 
 On every heartbeat tick the daemon publishes a `ClientVersion` metric to CloudWatch with dimensions `UserEmail` and `Version`. The usage dashboard reads this metric and displays the client version (e.g. `v1.0.0`) next to each user's email address. This lets administrators confirm which binary version is deployed across their fleet without any manual inventory.
-
-### Fast Startup
-
-After the daemon starts it polls for cached credentials every 1 second. As soon as credentials are available it launches otelcol immediately. This eliminates the previous up-to-10-second delay before metrics collection began.
-
-### Proactive otelcol Credential Refresh
-
-The daemon tracks when the collector credentials are due to expire. Five minutes before expiry it proactively restarts otelcol, forcing a fresh credential exchange first. This prevents 403 errors that would otherwise occur when otelcol holds stale in-memory credentials past their expiry.
 
 ### OS-Level Watchdog
 

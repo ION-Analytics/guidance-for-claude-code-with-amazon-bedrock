@@ -79,7 +79,6 @@
     <span class="key-item"><b>Ind</b> Individual policy override</span>
     <span class="key-item"><span class="hb-dot green" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;vertical-align:middle;"></span> credential-process seen &lt;15 min</span>
     <span class="key-item"><span class="hb-dot red" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f85149;vertical-align:middle;"></span> credential-process not seen</span>
-    <span class="key-item">2nd dot = otelcol status</span>
   </div>
   <div id="content"><div class="empty">Loading…</div></div>
 
@@ -87,7 +86,7 @@
     let currentWindow = 'day:0';  // 'day:N' or 'period:week' / 'period:month'
     let timer = null;
     const REFRESH_MS = 30000;
-    let heartbeats = {};  // {email: {cw: bool, otlp: bool, version: str}}
+    let heartbeats = {};  // {email: {cw: bool, version: str}}
     let quotas = {};      // {email: {daily_pct, daily_label, daily_enforcement, monthly_pct, monthly_label, monthly_enforcement}}
 
     function isToday() { return currentWindow === 'day:0'; }
@@ -114,14 +113,11 @@
         // User has usage today but has never sent a heartbeat — show grey
         return '<span class="hb">' +
           '<span class="hb-dot grey" title="credential-process: no data"></span>' +
-          '<span class="hb-dot grey" title="otelcol: no data"></span>' +
           '</span>';
       }
       const cwCls  = hb.cw   ? 'green' : 'red';
-      const otlpCls = hb.otlp ? 'green' : 'red';
       return '<span class="hb">' +
         '<span class="hb-dot ' + cwCls  + '" title="credential-process running (last 15 min)"></span>' +
-        '<span class="hb-dot ' + otlpCls + '" title="otelcol running (last 15 min)"></span>' +
         '</span>';
     }
 

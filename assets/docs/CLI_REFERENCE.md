@@ -333,12 +333,11 @@ This ensures that packaging always works, even if some optional platforms are no
   - `credential-process-linux-x64` - Linux x64
   - `credential-process-linux-arm64` - Linux ARM64
   - `credential-process-windows.exe` - Windows x64
-- `otel-helper-<platform>` - OTEL helper (if monitoring enabled)
 - `config.json` - Configuration
 - `install.sh` - Unix installer script (auto-detects architecture)
 - `install.bat` - Windows installer script
 - `README.md` - Installation instructions
-- Includes Claude Code telemetry settings (if monitoring enabled)
+- Includes Claude Code telemetry settings pre-configured with the OTLP endpoint (if monitoring enabled)
 - Configures environment variables for model selection (ANTHROPIC_MODEL, ANTHROPIC_SMALL_FAST_MODEL)
 
 **Credential process binary flags (for end users):**
@@ -393,11 +392,6 @@ dist/
 ├── credential-process-linux-x64       # Linux x64 executable
 ├── credential-process-linux-arm64     # Linux ARM64 executable
 ├── credential-process-windows.exe     # Windows x64 executable
-├── otel-helper-macos-arm64           # macOS ARM64 OTEL helper
-├── otel-helper-macos-intel           # macOS Intel OTEL helper
-├── otel-helper-linux-x64             # Linux x64 OTEL helper
-├── otel-helper-linux-arm64           # Linux ARM64 OTEL helper
-├── otel-helper-windows.exe           # Windows OTEL helper
 ├── config.json                       # Configuration
 ├── install.sh                        # Unix installer (auto-detects architecture)
 ├── install.bat                       # Windows installer
@@ -574,7 +568,7 @@ poetry run ccwb status [options]
 - Checks CloudFormation stack status
 - Displays Identity Pool information
 - Shows monitoring configuration and endpoints
-- In sidecar monitoring mode, shows local collector status (running/stopped) and the local OTLP endpoint
+- In sidecar monitoring mode, shows the local OTLP endpoint configured for direct CloudWatch export
 
 ### `cleanup` - Remove Installed Components
 

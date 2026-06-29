@@ -365,8 +365,6 @@ The distribution package (`dist/`) contains:
 dist/
 ├── credential-process-windows.exe      # Windows auth binary (~28 MB)
 ├── credential-process-macos-arm64      # macOS ARM64 binary (~26 MB)
-├── otel-helper-windows.exe            # Windows telemetry helper (~28 MB)
-├── otel-helper-macos-arm64            # macOS telemetry helper (~26 MB)
 ├── config.json                        # Configuration with Cognito settings
 ├── install.sh                         # macOS/Linux installer script
 ├── install.bat                        # Windows installer script
@@ -602,8 +600,6 @@ C:\Python312\python.exe -m nuitka \
 /source/
 ├── credential_provider/
 │   └── __main__.py           # Main authentication module
-├── otel_helper/
-│   └── __main__.py           # Telemetry helper module
 ├── claude_code_with_bedrock/
 │   └── cli/
 │       └── commands/

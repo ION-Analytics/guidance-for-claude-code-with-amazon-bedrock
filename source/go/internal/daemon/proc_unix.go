@@ -10,5 +10,3 @@ import (
 func detachProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
-
-func otelcolBinary() string { return "otelcol" }

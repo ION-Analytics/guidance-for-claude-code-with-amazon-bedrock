@@ -1,12 +1,10 @@
-// Package daemon manages the otelcol lifecycle and emits heartbeat metrics.
+// Package daemon manages credential mirroring and emits heartbeat metrics.
 // Mirrors the behaviour of source/credential_provider/daemon.py.
 //
 // Spawned by credential-process --daemon; runs detached as a background
 // process. Responsibilities:
 //   - Mirror main AWS credentials into the {profile}-collector credentials profile
-//   - Start and monitor otelcol
-//   - Emit claude_code.daemon.heartbeat via OTLP (localhost:4318)
-//   - Emit CollectorHeartbeat directly to CloudWatch via PutMetricData
+//   - Emit CollectorHeartbeat and ClientVersion directly to CloudWatch via PutMetricData
 package daemon
 
 import (
@@ -16,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,15 +31,13 @@ import (
 )
 
 const (
-	interval      = 300 * time.Second // 5 minutes between health checks
-	cwNamespace   = "ClaudeCode/Security"
-	collectorPort = 8888
+	interval    = 300 * time.Second // 5 minutes between health checks
+	cwNamespace = "ClaudeCode/Security"
 )
 
 // Run is the main entry point for daemon mode. It blocks until a signal is received.
 func Run(profile string, installDir string, cacheDir string) {
 	pidFile := filepath.Join(installDir, "daemon.pid")
-	collectorPidFile := filepath.Join(installDir, "collector.pid")
 	logFile := filepath.Join(cacheDir, "daemon.log")
 
 	// Set up file logging
@@ -72,39 +67,16 @@ func Run(profile string, installDir string, cacheDir string) {
 	go func() {
 		sig := <-sigCh
 		logger.infof("daemon received signal %v, shutting down", sig)
-		stopOtelcol(collectorPidFile, logger)
 		os.Remove(pidFile)
 		os.Exit(0)
 	}()
 
 	d := &daemonState{
-		profile:          profile,
-		installDir:       installDir,
-		cacheDir:         cacheDir,
-		pidFile:          pidFile,
-		collectorPidFile: collectorPidFile,
-		logger:           logger,
-	}
-
-	// Initial otelcol start
-	if !otelcolRunning(collectorPidFile) {
-		logger.infof("otelcol not running at startup, starting")
-		d.startOtelcol()
-		time.Sleep(3 * time.Second)
-	}
-
-	// If otelcol still not up (no creds yet), poll at 1s until it starts
-	if !otelcolRunning(collectorPidFile) {
-		fastTick := time.NewTicker(1 * time.Second)
-	fastLoop:
-		for range fastTick.C {
-			if d.credentialsCached() {
-				d.startOtelcol()
-				time.Sleep(1 * time.Second)
-				fastTick.Stop()
-				break fastLoop
-			}
-		}
+		profile:    profile,
+		installDir: installDir,
+		cacheDir:   cacheDir,
+		pidFile:    pidFile,
+		logger:     logger,
 	}
 
 	lastCheck := time.Time{}
@@ -112,22 +84,6 @@ func Run(profile string, installDir string, cacheDir string) {
 	defer tick.Stop()
 
 	for range tick.C {
-		// Opportunistic start every tick (as soon as credentials available)
-		if !otelcolRunning(collectorPidFile) && d.credentialsCached() {
-			d.startOtelcol()
-		}
-
-		// Proactive restart: if collector credentials expire within 5 minutes,
-		// force a credential refresh then restart otelcol with fresh creds.
-		if otelcolRunning(collectorPidFile) && d.collectorCredsExpiringSoon() {
-			logger.infof("collector credentials expiring soon, forcing refresh and restarting otelcol")
-			cp := filepath.Join(d.installDir, "credential-process")
-			_ = exec.Command(cp, "--profile", d.profile, "--clear-cache").Run()
-			d.writeCollectorCredentials()
-			stopOtelcol(collectorPidFile, logger)
-			d.startOtelcol()
-		}
-
 		now := time.Now()
 		if now.Sub(lastCheck) < interval {
 			continue
@@ -141,24 +97,14 @@ func Run(profile string, installDir string, cacheDir string) {
 			0600,
 		)
 
-		if !otelcolRunning(collectorPidFile) {
-			logger.infof("otelcol not running, attempting start")
-			d.startOtelcol()
-		} else if !d.stsValid() {
-			logger.infof("STS check failed, refreshing credentials and restarting otelcol")
-			cp := filepath.Join(installDir, "credential-process")
-			_ = exec.Command(cp, "--profile", profile, "--clear-cache").Run()
-			d.writeCollectorCredentials()
-			stopOtelcol(collectorPidFile, logger)
-			d.startOtelcol()
-		} else {
+		if d.credentialsCached() {
 			d.writeCollectorCredentials()
 		}
 
 		// Send heartbeat
 		email := strings.ToLower(d.readEmail())
 		if email != "" {
-			d.sendHeartbeat(email, otelcolRunning(collectorPidFile))
+			d.sendHeartbeat(email)
 		} else {
 			logger.infof("no email found, skipping heartbeat")
 		}
@@ -199,12 +145,11 @@ func EnsureRunning(profile string, installDir string) {
 // ---------------------------------------------------------------------------
 
 type daemonState struct {
-	profile          string
-	installDir       string
-	cacheDir         string
-	pidFile          string
-	collectorPidFile string
-	logger           *logger
+	profile    string
+	installDir string
+	cacheDir   string
+	pidFile    string
+	logger     *logger
 }
 
 func (d *daemonState) credentialsCached() bool {
@@ -215,46 +160,12 @@ func (d *daemonState) credentialsCached() bool {
 	return !isExpired(creds)
 }
 
-func (d *daemonState) collectorCredentialsValid() bool {
-	creds, err := readCredentials(d.profile + "-collector")
-	if err != nil || creds == nil {
-		return false
-	}
-	return !isExpired(creds)
-}
-
-func (d *daemonState) stsValid() bool {
-	return d.credentialsCached() && d.collectorCredentialsValid()
-}
-
-func (d *daemonState) collectorCredsExpiringSoon() bool {
-	creds, err := readCredentials(d.profile + "-collector")
-	if err != nil || creds == nil {
-		return false
-	}
-	if creds.expiration == "" {
-		return false
-	}
-	exp := creds.expiration
-	exp = strings.ReplaceAll(exp, "Z", "+00:00")
-	t, err := time.Parse(time.RFC3339, exp)
-	if err != nil {
-		t, err = time.Parse("2006-01-02T15:04:05+00:00", exp)
-		if err != nil {
-			return false
-		}
-	}
-	return time.Until(t) < 5*time.Minute
-}
-
 func (d *daemonState) readEmail() string {
 	tokenFile := filepath.Join(d.cacheDir, d.profile+"-monitoring.json")
 	raw, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return ""
 	}
-	// Parse {"email": "..."} — avoid importing encoding/json to keep binary small.
-	// Simple extraction is safe: the file is written by this process.
 	s := string(raw)
 	key := `"email"`
 	idx := strings.Index(s, key)
@@ -301,7 +212,6 @@ func (d *daemonState) writeCollectorCredentials() {
 
 	sec, err := cfg.NewSection(collectorProfile)
 	if err != nil {
-		// Section already exists — get it
 		sec, err = cfg.GetSection(collectorProfile)
 		if err != nil {
 			d.logger.warnf("failed to get/create collector section: %v", err)
@@ -329,65 +239,8 @@ func (d *daemonState) writeCollectorCredentials() {
 	d.logger.infof("wrote collector credentials for %s", collectorProfile)
 }
 
-func (d *daemonState) startOtelcol() {
-	otelcol := filepath.Join(d.installDir, otelcolBinary())
-	config := filepath.Join(d.installDir, "collector-config.yaml")
-	if _, err := os.Stat(otelcol); os.IsNotExist(err) {
-		d.logger.infof("otelcol binary not found, skipping")
-		return
-	}
-	if _, err := os.Stat(config); os.IsNotExist(err) {
-		d.logger.infof("collector-config.yaml not found, skipping")
-		return
-	}
-	if !d.credentialsCached() {
-		d.logger.warnf("no cached credentials found, deferring otelcol start until credentials available")
-		return
-	}
-	d.writeCollectorCredentials()
-
-	env := filterEnv([]string{
-		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-		"AWS_SESSION_TOKEN", "AWS_SESSION_EXPIRATION",
-		"AWS_CREDENTIAL_EXPIRATION",
-	})
-	env = append(env, "AWS_PROFILE="+d.profile+"-collector")
-
-	logPath := filepath.Join(d.cacheDir, "collector.log")
-	lf, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		d.logger.warnf("failed to open collector log: %v", err)
-		return
-	}
-
-	cmd := exec.Command(otelcol, "--config", config) // #nosec G204
-	cmd.Env = env
-	cmd.Stdout = lf
-	cmd.Stderr = lf
-	detachProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		lf.Close()
-		d.logger.warnf("failed to start otelcol: %v", err)
-		return
-	}
-	_ = os.WriteFile(d.collectorPidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600)
-	d.logger.infof("started otelcol pid=%d", cmd.Process.Pid)
-
-	// Don't wait — detached process
-	go func() {
-		_ = cmd.Wait()
-		lf.Close()
-	}()
-}
-
-func (d *daemonState) sendHeartbeat(email string, otelcolUp bool) {
-	// Dot 1: credential-process alive (always sent — we are the credential-process daemon)
+func (d *daemonState) sendHeartbeat(email string) {
 	d.sendCloudWatchMetric(email, "CollectorHeartbeat", "UserEmail")
-	// Dot 2: otelcol running
-	if otelcolUp {
-		d.sendCloudWatchMetric(email, "OtelcolHeartbeat", "UserEmail")
-	}
-	// Version beacon — emitted once per heartbeat cycle so the dashboard can read it
 	d.sendCloudWatchMetricWithDims(email, "ClientVersion", map[string]string{
 		"UserEmail": email,
 		"Version":   version.Version,
@@ -425,15 +278,14 @@ func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimN
 
 	payloadHash := sha256Hex(bodyStr)
 	headersToSign := map[string]string{
-		"content-type":         "application/x-www-form-urlencoded",
-		"host":                 host,
-		"x-amz-date":          amzDate,
+		"content-type": "application/x-www-form-urlencoded",
+		"host":         host,
+		"x-amz-date":  amzDate,
 	}
 	if creds.sessionToken != "" {
 		headersToSign["x-amz-security-token"] = creds.sessionToken
 	}
 
-	// Build canonical request
 	var headerKeys []string
 	for k := range headersToSign {
 		headerKeys = append(headerKeys, k)
@@ -465,11 +317,9 @@ func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimN
 		),
 		"aws4_request",
 	)
-	signature := fmt.Sprintf("%x", hmac.New(sha256.New, signingKey).Sum(nil))
-	// Re-do to get actual signature (Sum appends to empty)
 	mac := hmac.New(sha256.New, signingKey)
 	mac.Write([]byte(stringToSign))
-	signature = fmt.Sprintf("%x", mac.Sum(nil))
+	signature := fmt.Sprintf("%x", mac.Sum(nil))
 
 	authHeader := fmt.Sprintf(
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
@@ -477,10 +327,10 @@ func (d *daemonState) sendCloudWatchMetric(email string, metricName string, dimN
 	)
 
 	reqHeaders := map[string]string{
-		"Content-Type":         "application/x-www-form-urlencoded",
-		"Host":                 host,
-		"X-Amz-Date":          amzDate,
-		"Authorization":       authHeader,
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Host":         host,
+		"X-Amz-Date":  amzDate,
+		"Authorization": authHeader,
 	}
 	if creds.sessionToken != "" {
 		reqHeaders["X-Amz-Security-Token"] = creds.sessionToken
@@ -530,7 +380,6 @@ func (d *daemonState) sendCloudWatchMetricWithDims(email string, metricName stri
 	body.Set("MetricData.member.1.Value", "1.0")
 	body.Set("MetricData.member.1.Unit", "Count")
 
-	// Sort dim keys so the body encoding is deterministic (required for SigV4)
 	dimKeys := make([]string, 0, len(dims))
 	for k := range dims {
 		dimKeys = append(dimKeys, k)
@@ -545,9 +394,9 @@ func (d *daemonState) sendCloudWatchMetricWithDims(email string, metricName stri
 
 	payloadHash := sha256Hex(bodyStr)
 	headersToSign := map[string]string{
-		"content-type":        "application/x-www-form-urlencoded",
-		"host":                host,
-		"x-amz-date":         amzDate,
+		"content-type": "application/x-www-form-urlencoded",
+		"host":         host,
+		"x-amz-date":  amzDate,
 	}
 	if creds.sessionToken != "" {
 		headersToSign["x-amz-security-token"] = creds.sessionToken
@@ -594,10 +443,10 @@ func (d *daemonState) sendCloudWatchMetricWithDims(email string, metricName stri
 	)
 
 	reqHeaders := map[string]string{
-		"Content-Type":        "application/x-www-form-urlencoded",
-		"Host":                host,
-		"X-Amz-Date":         amzDate,
-		"Authorization":      authHeader,
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Host":         host,
+		"X-Amz-Date":  amzDate,
+		"Authorization": authHeader,
 	}
 	if creds.sessionToken != "" {
 		reqHeaders["X-Amz-Security-Token"] = creds.sessionToken
@@ -619,43 +468,6 @@ func (d *daemonState) sendCloudWatchMetricWithDims(email string, metricName stri
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	d.logger.infof("CW %s sent for %s status=%d", metricName, email, resp.StatusCode)
-}
-
-// ---------------------------------------------------------------------------
-// otelcol helpers
-// ---------------------------------------------------------------------------
-
-func otelcolRunning(pidFile string) bool {
-	raw, err := os.ReadFile(pidFile)
-	if err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if err == nil && pid > 0 && processAlive(pid) {
-			return true
-		}
-	}
-	// Fallback: check port 8888
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(collectorPort), 500*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		return true
-	}
-	return false
-}
-
-func stopOtelcol(pidFile string, l *logger) {
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err == nil && pid > 0 {
-		p, err := os.FindProcess(pid)
-		if err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-			l.infof("stopped otelcol pid=%d", pid)
-		}
-	}
-	os.Remove(pidFile)
 }
 
 // ---------------------------------------------------------------------------
@@ -715,11 +527,6 @@ func isExpiredPlaceholder(c *awsStaticCreds) bool {
 }
 
 // ---------------------------------------------------------------------------
-// OTLP protobuf helpers
-// ---------------------------------------------------------------------------
-
-
-// ---------------------------------------------------------------------------
 // misc helpers
 // ---------------------------------------------------------------------------
 
@@ -729,24 +536,6 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
-}
-
-func filterEnv(exclude []string) []string {
-	excl := make(map[string]bool, len(exclude))
-	for _, k := range exclude {
-		excl[k] = true
-	}
-	var out []string
-	for _, e := range os.Environ() {
-		idx := strings.IndexByte(e, '=')
-		if idx < 0 {
-			continue
-		}
-		if !excl[e[:idx]] {
-			out = append(out, e)
-		}
-	}
-	return out
 }
 
 func sortStrings(ss []string) {

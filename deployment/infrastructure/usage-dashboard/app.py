@@ -180,12 +180,10 @@ def usage():
 def heartbeats():
     """Return heartbeat status for all users seen today.
 
-    Queries two CloudWatch metrics over the last 15 minutes:
+    Queries CloudWatch metrics over the last 15 minutes:
     - ClaudeCode/Security / CollectorHeartbeat  (daemon alive)
-    - ClaudeCode/Security / OtelcolHeartbeat    (otelcol process running)
 
-    Returns {email: {cw: bool, otlp: bool}} for every user that has ever sent
-    either heartbeat (ListMetrics determines the known set).
+    Returns {email: {cw: bool}} for every user that has ever sent a heartbeat.
     """
     cw = boto3.client("cloudwatch", region_name=REGION)
     now = datetime.now(timezone.utc)
@@ -193,13 +191,12 @@ def heartbeats():
     # Version lookback is longer — a user might not have sent a beat in the last 15 min
     version_window_start = now - timedelta(hours=24)
 
-    # Collect all known users from both metric dimensions
+    # Collect all known users from CollectorHeartbeat metric
     users = set()
     user_versions = {}  # email -> version string from ClientVersion metric
     try:
         for namespace, metric_name, dim_name in [
             ("ClaudeCode/Security", "CollectorHeartbeat", "UserEmail"),
-            ("ClaudeCode/Security", "OtelcolHeartbeat", "UserEmail"),
         ]:
             paginator = cw.get_paginator("list_metrics")
             for page in paginator.paginate(Namespace=namespace, MetricName=metric_name):
@@ -229,7 +226,7 @@ def heartbeats():
     user_list = sorted(users)
 
     # Build GetMetricData queries:
-    #   - 2 per user for heartbeat dots (CollectorHeartbeat + OtelcolHeartbeat)
+    #   - 1 per user for heartbeat dot (CollectorHeartbeat)
     #   - 1 per (email, version) candidate to find the most recently active version
     queries = []
     # Map from query id -> (email, version) for version candidates
@@ -243,19 +240,6 @@ def heartbeats():
                 "Metric": {
                     "Namespace": "ClaudeCode/Security",
                     "MetricName": "CollectorHeartbeat",
-                    "Dimensions": [{"Name": "UserEmail", "Value": email}],
-                },
-                "Period": 900,
-                "Stat": "Sum",
-            },
-            "ReturnData": True,
-        })
-        queries.append({
-            "Id": f"otlp_{safe}",
-            "MetricStat": {
-                "Metric": {
-                    "Namespace": "ClaudeCode/Security",
-                    "MetricName": "OtelcolHeartbeat",
                     "Dimensions": [{"Name": "UserEmail", "Value": email}],
                 },
                 "Period": 900,
@@ -288,7 +272,7 @@ def heartbeats():
         })
 
     # Split queries: heartbeat queries use 15-min window; version queries use 24h window
-    hb_queries = [q for q in queries if q["Id"].startswith("cw_") or q["Id"].startswith("otlp_")]
+    hb_queries = [q for q in queries if q["Id"].startswith("cw_")]
     ver_queries = [q for q in queries if q["Id"].startswith("ver_")]
 
     try:
@@ -350,7 +334,6 @@ def heartbeats():
         safe = email.replace("@", "_at_").replace(".", "_").replace("-", "_")[:60]
         result[email] = {
             "cw": all_results.get(f"cw_{safe}", {}).get("active", False),
-            "otlp": all_results.get(f"otlp_{safe}", {}).get("active", False),
             "version": user_versions.get(email, ""),
         }
 

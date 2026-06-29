@@ -14,5 +14,3 @@ func detachProcess(cmd *exec.Cmd) {
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | detachedProcess,
 	}
 }
-
-func otelcolBinary() string { return "otelcol.exe" }

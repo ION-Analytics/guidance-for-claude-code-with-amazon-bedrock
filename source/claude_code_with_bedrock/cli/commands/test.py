@@ -151,17 +151,6 @@ class TestCommand(Command):
 
         console.print(f"✓ Found binary: {credential_binary.name}")
 
-        # Check for OTEL helper (optional)
-        otel_binary = package_dir / f"otel-helper-{platform_suffix}"
-        if system == "windows" and not otel_binary.exists():
-            otel_binary = package_dir / f"otel-helper-{platform_suffix}.exe"
-
-        has_otel = otel_binary.exists()
-        if has_otel:
-            console.print(f"✓ Found OTEL helper: {otel_binary.name}")
-        else:
-            console.print("[dim]  - OTEL helper not included (monitoring disabled)[/dim]")
-
         # Check config
         config_path = package_dir / "config.json"
         if not config_path.exists():
@@ -405,14 +394,6 @@ class TestCommand(Command):
                     test_results.append(("Quota Monitoring", "!", "Enabled but API endpoint not configured"))
                 else:
                     test_results.append(("Quota Monitoring", "-", "Skipped (not enabled)"))
-
-                # Test 7: Local collector sidecar (sidecar mode only)
-                monitoring_mode = getattr(profile, "monitoring_mode", "central")
-                if profile.monitoring_enabled and monitoring_mode == "sidecar":
-                    task = progress.add_task("Testing local collector sidecar...", total=None)
-                    result = self._test_local_collector(package_dir)
-                    test_results.append(("Local Collector", result["status"], result["details"]))
-                    progress.update(task, completed=True)
 
         # Display results
         console.print("\n")
@@ -768,93 +749,6 @@ class TestCommand(Command):
             return {"status": "!", "details": "Request timed out"}
         except Exception as e:
             return {"status": "✗", "details": str(e)}
-
-    def _test_otel_helper(self, otel_binary: Path, credential_binary: Path) -> dict:
-        """Test OTEL helper functionality."""
-        try:
-            # First get a monitoring token
-            token_result = subprocess.run(
-                [str(credential_binary), "--get-monitoring-token"], capture_output=True, text=True, timeout=30
-            )
-
-            if token_result.returncode != 0 or not token_result.stdout.strip():
-                return {"status": "!", "details": "Could not get monitoring token"}
-
-            # Test OTEL helper with the token
-            import os
-
-            env = os.environ.copy()
-            env["CLAUDE_CODE_MONITORING_TOKEN"] = token_result.stdout.strip()
-
-            otel_result = subprocess.run(
-                [str(otel_binary), "--test"], capture_output=True, text=True, env=env, timeout=10
-            )
-
-            if otel_result.returncode == 0:
-                # Parse output to extract key claims
-                output = otel_result.stdout
-                email = None
-                user_id = None
-
-                for line in output.split("\n"):
-                    if "X-user-email:" in line:
-                        email = line.split(":", 1)[1].strip()
-                    elif "user.id:" in line and not user_id:
-                        user_id = line.split(":", 1)[1].strip()[:20] + "..."
-
-                if email:
-                    details = f"Claims extracted: email={email[:20]}..."
-                    if user_id:
-                        details += f", id={user_id}"
-                    return {"status": "✓", "details": details}
-                else:
-                    return {"status": "✓", "details": "OTEL helper working"}
-            else:
-                return {"status": "✗", "details": "OTEL helper failed"}
-        except subprocess.TimeoutExpired:
-            return {"status": "✗", "details": "OTEL helper timeout"}
-        except Exception as e:
-            return {"status": "✗", "details": str(e)[:50]}
-
-    def _test_local_collector(self, package_dir: Path) -> dict:
-        """Test that the local OTEL collector sidecar binary is present and can start."""
-        import platform as platform_mod
-        import time
-
-        system = platform_mod.system().lower()
-        arch = platform_mod.machine().lower()
-
-        # Determine expected binary name
-        if system == "darwin":
-            suffix = "macos-arm64" if arch == "arm64" else "macos-intel"
-        elif system == "windows":
-            suffix = "windows.exe"
-        else:
-            suffix = "linux-arm64" if arch in ["arm64", "aarch64"] else "linux-x64"
-
-        binary = package_dir / f"otelcol-{suffix}"
-        if not binary.exists():
-            return {"status": "✗", "details": f"Collector binary not found: otelcol-{suffix}"}
-
-        config = package_dir / "collector-config.yaml"
-        if not config.exists():
-            return {"status": "✗", "details": "collector-config.yaml not found in package"}
-
-        # Try starting the collector briefly to verify it's functional
-        try:
-            proc = subprocess.Popen(
-                [str(binary), "--config", str(config)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            time.sleep(2)
-            if proc.poll() is not None:
-                stderr = proc.stderr.read().decode()[:100]
-                return {"status": "✗", "details": f"Collector exited immediately: {stderr}"}
-            proc.terminate()
-            proc.wait(timeout=5)
-            return {"status": "✓", "details": f"Collector binary OK ({binary.name})"}
-        except Exception as e:
-            return {"status": "✗", "details": str(e)[:80]}
 
     def _get_package_profile_name(self, package_dir: Path) -> str | None:
         """Get the profile name from the package's config.json."""
