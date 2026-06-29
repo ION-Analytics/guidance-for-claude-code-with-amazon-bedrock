@@ -433,6 +433,10 @@ class PackageCommand(Command):
             output_dir, profile, built_executables, has_windows_codebuild=windows_codebuild_pending
         )
 
+        # Create cleanup scripts
+        console.print("[cyan]Creating cleanup scripts...[/cyan]")
+        self._create_cleanup_scripts(output_dir, profile)
+
         # Create documentation
         console.print("[cyan]Creating documentation...[/cyan]")
         self._create_documentation(output_dir, profile, timestamp)
@@ -458,9 +462,11 @@ class PackageCommand(Command):
 
         console.print("  • config.json - Configuration")
         console.print("  • install.sh - Installation script for macOS/Linux")
+        console.print("  • cleanup.sh - Cleanup script for macOS/Linux")
         # Check if Windows installer exists (created when Windows binaries are present)
         if (output_dir / "install.bat").exists():
             console.print("  • install.bat - Installation script for Windows")
+            console.print("  • cleanup.bat - Cleanup script for Windows")
         console.print("  • README.md - Installation instructions")
         if profile.cowork_3p_enabled:
             if (output_dir / "cowork-3p-config.json").exists():
@@ -1972,6 +1978,220 @@ pause
 
         # Note: chmod not needed on Windows batch files
         return installer_path
+
+    def _create_cleanup_scripts(self, output_dir: Path, profile):
+        """Create cleanup scripts for end users to uninstall."""
+
+        # Unix cleanup script (macOS/Linux)
+        cleanup_sh = f"""#!/bin/bash
+# Claude Code Authentication Cleanup
+# Organization: {profile.provider_domain}
+# This script removes all authentication components installed by install.sh
+
+set -e
+
+echo "======================================"
+echo "Claude Code Authentication Cleanup"
+echo "======================================"
+echo
+echo "This will remove:"
+echo "  • ~/claude-code-with-bedrock/ (binaries and config)"
+echo "  • ~/.claude/settings.json (Claude Code settings)"
+echo "  • AWS profile configuration in ~/.aws/config"
+echo
+
+# Confirm removal
+read -p "Continue with cleanup? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Cleanup cancelled."
+    exit 0
+fi
+
+echo
+echo "Cleaning up..."
+
+# Stop and remove launchd daemon (macOS only)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    PLIST_LABEL="com.ionanalytics.claude-code-daemon"
+    PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+
+    if [ -f "$PLIST_PATH" ]; then
+        echo "Stopping daemon..."
+        LAUNCH_DOMAIN="gui/$(id -u)"
+        launchctl bootout "$LAUNCH_DOMAIN/$PLIST_LABEL" 2>/dev/null || launchctl unload "$PLIST_PATH" 2>/dev/null || true
+        rm -f "$PLIST_PATH"
+        echo "✓ Removed launchd daemon"
+    fi
+fi
+
+# Remove authentication directory
+if [ -d ~/claude-code-with-bedrock ]; then
+    # Stop daemon if running
+    if [ -f ~/claude-code-with-bedrock/daemon.pid ]; then
+        kill "$(cat ~/claude-code-with-bedrock/daemon.pid)" 2>/dev/null || true
+    fi
+
+    rm -rf ~/claude-code-with-bedrock
+    echo "✓ Removed ~/claude-code-with-bedrock"
+fi
+
+# Remove Claude Code settings
+if [ -f ~/.claude/settings.json ]; then
+    rm -f ~/.claude/settings.json
+    echo "✓ Removed ~/.claude/settings.json"
+
+    # Remove .claude directory if empty
+    if [ -d ~/.claude ] && [ -z "$(ls -A ~/.claude)" ]; then
+        rmdir ~/.claude
+        echo "✓ Removed empty ~/.claude directory"
+    fi
+fi
+
+# Remove AWS profiles
+if [ -f ~/.aws/config ]; then
+    echo "Removing AWS profiles..."
+    python3 -c "
+import re
+import sys
+
+config_path = '${{HOME}}/.aws/config'
+with open(config_path, 'r') as f:
+    content = f.read()
+
+# Remove all ClaudeCode profiles (main and -collector variants)
+content = re.sub(r'\\n\\[profile [^\\]]*ClaudeCode[^\\]]*\\][^\\[]*', '', content)
+content = re.sub(r'^\\[profile [^\\]]*ClaudeCode[^\\]]*\\][^\\[]*', '', content, flags=re.MULTILINE)
+content = content.strip()
+
+with open(config_path, 'w') as f:
+    f.write(content)
+    if content:
+        f.write('\\n')
+" 2>/dev/null || echo "  (manual profile removal may be needed)"
+    echo "✓ Removed AWS profiles from ~/.aws/config"
+fi
+
+# Remove AWS credentials file entries
+if [ -f ~/.aws/credentials ]; then
+    echo "Removing AWS credential entries..."
+    python3 -c "
+import re
+
+creds_path = '${{HOME}}/.aws/credentials'
+with open(creds_path, 'r') as f:
+    content = f.read()
+
+# Remove all ClaudeCode credential blocks
+content = re.sub(r'\\n\\[[^\\]]*ClaudeCode[^\\]]*\\][^\\[]*', '', content)
+content = re.sub(r'^\\[[^\\]]*ClaudeCode[^\\]]*\\][^\\[]*', '', content, flags=re.MULTILINE)
+content = content.strip()
+
+with open(creds_path, 'w') as f:
+    f.write(content)
+    if content:
+        f.write('\\n')
+" 2>/dev/null || echo "  (manual credential removal may be needed)"
+    echo "✓ Removed credential entries from ~/.aws/credentials"
+fi
+
+echo
+echo "======================================"
+echo "✓ Cleanup complete!"
+echo "======================================"
+"""
+
+        cleanup_sh_path = output_dir / "cleanup.sh"
+        with open(cleanup_sh_path, "w") as f:
+            f.write(cleanup_sh)
+        cleanup_sh_path.chmod(0o755)
+
+        # Windows cleanup script
+        cleanup_bat = f"""@echo off
+setlocal enabledelayedexpansion
+REM Claude Code Authentication Cleanup
+REM Organization: {profile.provider_domain}
+REM This script removes all authentication components installed by install.bat
+
+cd /d "%~dp0"
+
+echo ======================================
+echo Claude Code Authentication Cleanup
+echo ======================================
+echo.
+echo This will remove:
+echo   - %USERPROFILE%\\claude-code-with-bedrock (binaries and config)
+echo   - %USERPROFILE%\\.claude\\settings.json (Claude Code settings)
+echo   - AWS profile configuration
+echo   - Scheduled Task daemon
+echo.
+
+set /p CONFIRM="Continue with cleanup? (y/N): "
+if /i not "%CONFIRM%"=="y" (
+    echo Cleanup cancelled.
+    exit /b 0
+)
+
+echo.
+echo Cleaning up...
+
+REM Stop and remove Scheduled Task daemon
+echo Stopping daemon...
+schtasks /end /tn "ClaudeCodeDaemon" >nul 2>&1
+schtasks /delete /tn "ClaudeCodeDaemon" /f >nul 2>&1
+if %errorlevel% equ 0 (
+    echo OK Removed Scheduled Task daemon
+)
+
+REM Stop daemon process if running
+if exist "%USERPROFILE%\\claude-code-with-bedrock\\daemon.pid" (
+    for /f %%p in ('type "%USERPROFILE%\\claude-code-with-bedrock\\daemon.pid"') do (
+        taskkill /PID %%p /F >nul 2>&1
+    )
+)
+
+REM Remove authentication directory
+if exist "%USERPROFILE%\\claude-code-with-bedrock" (
+    rmdir /s /q "%USERPROFILE%\\claude-code-with-bedrock"
+    echo OK Removed %USERPROFILE%\\claude-code-with-bedrock
+)
+
+REM Remove Claude Code settings
+if exist "%USERPROFILE%\\.claude\\settings.json" (
+    del /f /q "%USERPROFILE%\\.claude\\settings.json"
+    echo OK Removed %USERPROFILE%\\.claude\\settings.json
+
+    REM Remove .claude directory if empty
+    dir /b "%USERPROFILE%\\.claude" | findstr "^" >nul || (
+        rmdir "%USERPROFILE%\\.claude" 2>nul
+        echo OK Removed empty .claude directory
+    )
+)
+
+REM Remove AWS profiles using PowerShell
+echo Removing AWS profiles...
+if exist "%USERPROFILE%\\.aws\\config" (
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try {{ $awsConfig = Join-Path $env:USERPROFILE '.aws\\config'; if (Test-Path $awsConfig) {{ $content = Get-Content $awsConfig -Raw; $content = $content -replace '(?ms)^\\[profile [^\\]]*ClaudeCode[^\\]]*\\].*?(?=^\\[|\\Z)', ''; $content = $content.Trim(); Set-Content -Path $awsConfig -Value $content -NoNewline -Encoding ASCII; Write-Host 'AWS profiles removed' }} }} catch {{ Write-Host 'Manual profile removal may be needed' }}"
+    echo OK Removed AWS profiles from config
+)
+
+REM Remove AWS credential entries using PowerShell
+if exist "%USERPROFILE%\\.aws\\credentials" (
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; try {{ $awsCreds = Join-Path $env:USERPROFILE '.aws\\credentials'; if (Test-Path $awsCreds) {{ $content = Get-Content $awsCreds -Raw; $content = $content -replace '(?ms)^\\[[^\\]]*ClaudeCode[^\\]]*\\].*?(?=^\\[|\\Z)', ''; $content = $content.Trim(); Set-Content -Path $awsCreds -Value $content -NoNewline -Encoding ASCII; Write-Host 'Credential entries removed' }} }} catch {{ Write-Host 'Manual credential removal may be needed' }}"
+    echo OK Removed credential entries
+)
+
+echo.
+echo ======================================
+echo Cleanup complete!
+echo ======================================
+echo.
+pause
+"""
+
+        cleanup_bat_path = output_dir / "cleanup.bat"
+        with open(cleanup_bat_path, "w", encoding="utf-8") as f:
+            f.write(cleanup_bat)
 
     def _create_documentation(self, output_dir: Path, profile, timestamp: str):
         """Create user documentation."""

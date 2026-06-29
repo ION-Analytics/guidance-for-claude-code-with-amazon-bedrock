@@ -494,6 +494,7 @@ class DistributeCommand(Command):
             "windows": [
                 ("credential-process-windows.exe", "credential-process-windows.exe"),
                 ("install.bat", "install.bat"),
+                ("cleanup.bat", "cleanup.bat"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
                 ("cowork-3p.reg", "cowork-3p.reg"),
@@ -503,6 +504,7 @@ class DistributeCommand(Command):
                 ("credential-process-linux-x64", "credential-process-linux-x64"),
                 ("credential-process-linux-arm64", "credential-process-linux-arm64"),
                 ("install.sh", "install.sh"),
+                ("cleanup.sh", "cleanup.sh"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
                 ("cowork-3p-config.json", "cowork-3p-config.json"),
@@ -511,6 +513,7 @@ class DistributeCommand(Command):
                 ("credential-process-macos-arm64", "credential-process-macos-arm64"),
                 ("credential-process-macos-intel", "credential-process-macos-intel"),
                 ("install.sh", "install.sh"),
+                ("cleanup.sh", "cleanup.sh"),
                 ("config.json", "config.json"),
                 ("README.md", "README.md"),
                 ("cowork-3p.mobileconfig", "cowork-3p.mobileconfig"),
@@ -1124,6 +1127,9 @@ class DistributeCommand(Command):
             # Installation scripts
             "install.sh",
             "install.bat",
+            # Cleanup scripts
+            "cleanup.sh",
+            "cleanup.bat",
             # Configuration
             "config.json",
             "README.md",
