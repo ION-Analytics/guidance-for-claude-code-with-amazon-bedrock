@@ -33,18 +33,56 @@ fields identity.arn, modelId,
 """
 
 MODEL_PRICING = {
-    "opus":   (5.00, 25.00, 0.50, 6.25),
-    "sonnet": (3.00, 15.00, 0.30, 3.75),
-    "haiku":  (1.00,  5.00, 0.10, 1.25),
+    # Claude 4.x series (per 1M tokens: input, output, cache_read, cache_write)
+    "opus-4":     (15.00, 75.00, 1.50, 18.75),
+    "sonnet-4":   (3.00,  15.00, 0.30, 3.75),
+    "haiku-4":    (0.80,  4.00,  0.08, 1.00),
+
+    # Claude 3.x series (legacy)
+    "opus-3":     (15.00, 75.00, 1.50, 18.75),
+    "sonnet-3":   (3.00,  15.00, 0.30, 3.75),
+    "haiku-3":    (0.25,  1.25,  0.025, 0.31),
+
+    # Claude Sonnet 5 (promotional pricing through Aug 2026)
+    "sonnet-5":   (2.00,  10.00, 0.20, 2.50),
+
+    # Fallback for generic names
+    "opus":       (15.00, 75.00, 1.50, 18.75),
+    "sonnet":     (3.00,  15.00, 0.30, 3.75),
+    "haiku":      (0.80,  4.00,  0.08, 1.00),
 }
 
 
 def _get_pricing(model_id):
     m = (model_id or "").lower()
+
+    # Check for Sonnet 5 first (most specific)
+    if "sonnet" in m and ("5" in m or "sonnet-5" in m):
+        return MODEL_PRICING["sonnet-5"]
+
+    # Check for versioned models (4.x, 3.x)
     if "opus" in m:
+        if "4" in m or "opus-4" in m:
+            return MODEL_PRICING["opus-4"]
+        if "3" in m or "opus-3" in m:
+            return MODEL_PRICING["opus-3"]
         return MODEL_PRICING["opus"]
+
     if "haiku" in m:
+        if "4" in m or "haiku-4" in m:
+            return MODEL_PRICING["haiku-4"]
+        if "3" in m or "haiku-3" in m:
+            return MODEL_PRICING["haiku-3"]
         return MODEL_PRICING["haiku"]
+
+    if "sonnet" in m:
+        if "4" in m or "sonnet-4" in m:
+            return MODEL_PRICING["sonnet-4"]
+        if "3" in m or "sonnet-3" in m:
+            return MODEL_PRICING["sonnet-3"]
+        return MODEL_PRICING["sonnet"]
+
+    # Default fallback
     return MODEL_PRICING["sonnet"]
 
 
@@ -121,7 +159,12 @@ def _run_cw_query(start_time, end_time):
     for row in result.get("results", []):
         f = {item["field"]: item["value"] for item in row}
         arn = f.get("identity.arn", "")
-        email = arn.split("/")[-1].lower() if "@" in arn else arn
+        session = arn.split("/")[-1] if "/" in arn else arn
+        if "@" not in session:
+            # Not a user session (e.g. app-to-app CrossAccountBedrockRole calls) —
+            # tracked on the separate cross-account usage dashboard instead.
+            continue
+        email = session.lower()
         model_id = f.get("modelId", "")
         inp = float(f.get("input_tokens", 0))
         out = float(f.get("output_tokens", 0))
