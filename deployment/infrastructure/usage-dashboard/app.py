@@ -16,27 +16,30 @@ REGION = os.environ.get("AWS_REGION", "eu-west-1")
 METRICS_TABLE = os.environ.get("USER_METRICS_TABLE", "UserQuotaMetrics")
 POLICIES_TABLE = os.environ.get("QUOTA_POLICIES_TABLE", "QuotaPolicies")
 
-QUERY = """
+# No `stats ... by` here on purpose - CloudWatch Logs Insights' grouped
+# aggregation has been observed to silently drop the majority of matching
+# rows when grouping recently-ingested data (verified: a plain `filter`
+# query reliably returned all 42 matching rows for a fixed window, while
+# `stats count() by identity.arn, modelId` on the identical window
+# returned only 14). We fetch raw per-invocation rows and sum them
+# ourselves in Python instead, where summation is exact.
+RAW_QUERY = """
 fields identity.arn, modelId,
        input.inputTokenCount,
        input.cacheReadInputTokenCount,
        input.cacheWriteInputTokenCount,
        output.outputTokenCount
 | filter ispresent(identity.arn)
-| stats
-    sum(input.inputTokenCount) as input_tokens,
-    sum(input.cacheReadInputTokenCount) as cache_read,
-    sum(input.cacheWriteInputTokenCount) as cache_write,
-    sum(output.outputTokenCount) as output_tokens,
-    count() as calls
-  by identity.arn, modelId
 """
+
+# CloudWatch Logs Insights caps a single query at this many results.
+QUERY_ROW_LIMIT = 10000
 
 MODEL_PRICING = {
     # Claude 4.x series (per 1M tokens: input, output, cache_read, cache_write)
-    "opus-4":     (15.00, 75.00, 1.50, 18.75),
+    "opus-4":     (5.00,  25.00, 0.50, 6.25),
     "sonnet-4":   (3.00,  15.00, 0.30, 3.75),
-    "haiku-4":    (0.80,  4.00,  0.08, 1.00),
+    "haiku-4":    (1.00,  5.00,  0.10, 1.25),
 
     # Claude 3.x series (legacy)
     "opus-3":     (15.00, 75.00, 1.50, 18.75),
@@ -47,9 +50,9 @@ MODEL_PRICING = {
     "sonnet-5":   (2.00,  10.00, 0.20, 2.50),
 
     # Fallback for generic names
-    "opus":       (15.00, 75.00, 1.50, 18.75),
+    "opus":       (5.00,  25.00, 0.50, 6.25),
     "sonnet":     (3.00,  15.00, 0.30, 3.75),
-    "haiku":      (0.80,  4.00,  0.08, 1.00),
+    "haiku":      (1.00,  5.00,  0.10, 1.25),
 }
 
 
@@ -137,50 +140,112 @@ def _period_window(period):
     return int(start.timestamp()), int(now.timestamp()), now.strftime("%B %Y") + " MTD"
 
 
-def _run_cw_query(start_time, end_time):
-    """Run the Bedrock usage CW Logs query and return {email: total_cost}."""
-    logs = boto3.client("logs", region_name=REGION)
+def _run_single_cw_query(logs, start_time, end_time, query_string):
+    """Run one CloudWatch Logs Insights query to completion and return
+    (raw_result_rows, error). Each raw row is the list-of-{field,value}
+    shape the API returns - no aggregation applied.
+    """
     response = logs.start_query(
         logGroupName=LOG_GROUP,
         startTime=start_time,
         endTime=end_time,
-        queryString=QUERY,
+        queryString=query_string,
+        limit=QUERY_ROW_LIMIT,
     )
     query_id = response["queryId"]
+    result = None
     for _ in range(60):
         result = logs.get_query_results(queryId=query_id)
         if result["status"] in ("Complete", "Failed", "Cancelled"):
             break
         time.sleep(1)
-    if result["status"] != "Complete":
-        return None, None, f"Query {result['status']}"
-    costs = {}
-    rows = []
-    for row in result.get("results", []):
-        f = {item["field"]: item["value"] for item in row}
-        arn = f.get("identity.arn", "")
+    if result is None or result["status"] != "Complete":
+        status = result["status"] if result else "Unknown"
+        return None, f"Query {status}"
+    return result.get("results", []), None
+
+
+def _fetch_raw_invocations(logs, start_time, end_time):
+    """Fetch every raw invocation row in [start_time, end_time) as plain
+    dicts, splitting the window in half and recursing if a single query
+    comes back at QUERY_ROW_LIMIT (meaning CloudWatch truncated it).
+
+    Raw `filter`-only queries (no `stats ... by`) were verified against
+    live data to reliably return every matching row; it's the grouping
+    step that's unreliable, so grouping/summation happens here instead,
+    in Python, after this function returns.
+    """
+    raw_rows, error = _run_single_cw_query(logs, start_time, end_time, RAW_QUERY)
+    if error:
+        return None, error
+
+    if len(raw_rows) >= QUERY_ROW_LIMIT and end_time - start_time > 1:
+        # Likely truncated - split the window and recurse rather than
+        # silently dropping whatever didn't fit in one page.
+        midpoint = start_time + (end_time - start_time) // 2
+        first_half, err1 = _fetch_raw_invocations(logs, start_time, midpoint)
+        if err1:
+            return None, err1
+        second_half, err2 = _fetch_raw_invocations(logs, midpoint, end_time)
+        if err2:
+            return None, err2
+        return first_half + second_half, None
+
+    parsed = []
+    for row in raw_rows:
+        fields = {item["field"]: item["value"] for item in row}
+        parsed.append({
+            "identity_arn": fields.get("identity.arn", ""),
+            "model_id": fields.get("modelId", ""),
+            "input_tokens": int(fields.get("input.inputTokenCount") or 0),
+            "output_tokens": int(fields.get("output.outputTokenCount") or 0),
+            "cache_read": int(fields.get("input.cacheReadInputTokenCount") or 0),
+            "cache_write": int(fields.get("input.cacheWriteInputTokenCount") or 0),
+        })
+    return parsed, None
+
+
+def _run_cw_query(start_time, end_time):
+    """Fetch raw Bedrock invocations for [start_time, end_time), aggregate
+    them in Python by (email, model), and return {email: total_cost}.
+    """
+    logs = boto3.client("logs", region_name=REGION)
+    raw, error = _fetch_raw_invocations(logs, start_time, end_time)
+    if error:
+        return None, None, error
+
+    grouped = {}
+    for inv in raw:
+        arn = inv["identity_arn"]
         session = arn.split("/")[-1] if "/" in arn else arn
         if "@" not in session:
             # Not a user session (e.g. app-to-app CrossAccountBedrockRole calls) —
             # tracked on the separate cross-account usage dashboard instead.
             continue
         email = session.lower()
-        model_id = f.get("modelId", "")
-        inp = float(f.get("input_tokens", 0))
-        out = float(f.get("output_tokens", 0))
-        cache_r = float(f.get("cache_read", 0))
-        cache_w = float(f.get("cache_write", 0))
-        calls = int(f.get("calls", 0))
-        usd = _calc_cost(inp, out, cache_r, cache_w, model_id)
+        key = (email, inv["model_id"])
+        if key not in grouped:
+            grouped[key] = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
+        g = grouped[key]
+        g["input_tokens"]  += inv["input_tokens"]
+        g["output_tokens"] += inv["output_tokens"]
+        g["cache_read"]    += inv["cache_read"]
+        g["cache_write"]   += inv["cache_write"]
+        g["calls"]         += 1
+
+    costs = {}
+    rows = []
+    for (email, model_id), g in grouped.items():
+        usd = _calc_cost(g["input_tokens"], g["output_tokens"], g["cache_read"], g["cache_write"], model_id)
         costs[email] = costs.get(email, 0.0) + usd
         rows.append({
             "email": email,
             "model": _short_model(model_id),
-            "calls": calls,
-            "input_tokens": int(inp),
-            "output_tokens": int(out),
-            "cache_read": int(cache_r),
-            "cache_write": int(cache_w),
+            "calls": g["calls"],
+            "input_tokens": g["input_tokens"],
+            "output_tokens": g["output_tokens"],
+            "cache_read": g["cache_read"],
+            "cache_write": g["cache_write"],
             "cost": round(usd, 4),
         })
     return costs, rows, None

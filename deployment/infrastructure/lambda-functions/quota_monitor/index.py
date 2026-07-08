@@ -52,6 +52,69 @@ INVOCATION_LOG_GROUP = os.environ.get("INVOCATION_LOG_GROUP", "bedrock-model-inv
 AGGREGATION_WINDOW = 900  # 15 minutes in seconds (matches EventBridge schedule)
 
 
+# No `stats ... by` in the query below on purpose - CloudWatch Logs
+# Insights' grouped aggregation has been observed to silently drop the
+# majority of matching rows when grouping recently-ingested data
+# (verified: a plain `filter` query reliably returned all 42 matching
+# rows for a fixed window, while `stats count() by identity.arn, modelId`
+# on the identical window returned only 14). Since this function is what
+# increments the quota counters, an undercount here directly understates
+# every user's recorded usage against their quota - so we fetch raw
+# per-invocation rows and sum them ourselves in Python instead.
+RAW_QUERY = """
+fields identity.arn, modelId,
+       input.inputTokenCount,
+       input.cacheReadInputTokenCount,
+       input.cacheWriteInputTokenCount,
+       output.outputTokenCount
+| filter ispresent(identity.arn)
+"""
+
+# CloudWatch Logs Insights caps a single query at this many results.
+QUERY_ROW_LIMIT = 10000
+
+
+def _run_single_query(logs, start_time, end_time):
+    response = logs.start_query(
+        logGroupName=INVOCATION_LOG_GROUP,
+        startTime=start_time,
+        endTime=end_time,
+        queryString=RAW_QUERY,
+        limit=QUERY_ROW_LIMIT,
+    )
+    query_id = response["queryId"]
+
+    # Poll until complete (typically 2-5 seconds)
+    result = None
+    for _ in range(30):
+        result = logs.get_query_results(queryId=query_id)
+        if result["status"] in ("Complete", "Failed", "Cancelled"):
+            break
+        time.sleep(1)
+
+    if result is None or result["status"] != "Complete":
+        status = result["status"] if result else "Unknown"
+        raise RuntimeError(f"CloudWatch Logs Insights query {status}")
+
+    return result.get("results", [])
+
+
+def _fetch_raw_invocations(logs, start_time, end_time):
+    """Fetch every raw invocation row in [start_time, end_time), splitting
+    the window in half and recursing if a single query comes back at
+    QUERY_ROW_LIMIT (meaning CloudWatch truncated it).
+    """
+    raw_rows = _run_single_query(logs, start_time, end_time)
+
+    if len(raw_rows) >= QUERY_ROW_LIMIT and end_time - start_time > 1:
+        midpoint = start_time + (end_time - start_time) // 2
+        first_half = _fetch_raw_invocations(logs, start_time, midpoint)
+        second_half = _fetch_raw_invocations(logs, midpoint, end_time)
+        return first_half + second_half
+
+    return raw_rows
+
+
 def fetch_usage_from_invocation_logs():
     """Query CloudWatch Logs Insights against Bedrock model invocation logs for the last 15 minutes.
 
@@ -64,42 +127,11 @@ def fetch_usage_from_invocation_logs():
     end_time = int(now.timestamp())
     start_time = end_time - AGGREGATION_WINDOW
 
-    query = """
-fields identity.arn, modelId,
-       input.inputTokenCount,
-       input.cacheReadInputTokenCount,
-       input.cacheWriteInputTokenCount,
-       output.outputTokenCount
-| filter ispresent(identity.arn)
-| stats
-    sum(input.inputTokenCount) as input_tokens,
-    sum(input.cacheReadInputTokenCount) as cache_read_tokens,
-    sum(input.cacheWriteInputTokenCount) as cache_write_tokens,
-    sum(output.outputTokenCount) as output_tokens
-  by identity.arn, modelId
-"""
-
-    response = logs.start_query(
-        logGroupName=INVOCATION_LOG_GROUP,
-        startTime=start_time,
-        endTime=end_time,
-        queryString=query,
-    )
-    query_id = response["queryId"]
-
-    # Poll until complete (typically 2-5 seconds)
-    for _ in range(30):
-        result = logs.get_query_results(queryId=query_id)
-        if result["status"] in ("Complete", "Failed", "Cancelled"):
-            break
-        time.sleep(1)
-
-    if result["status"] != "Complete":
-        raise RuntimeError(f"CloudWatch Logs Insights query {result['status']}")
+    raw_rows = _fetch_raw_invocations(logs, start_time, end_time)
 
     # Aggregate per user across models, applying correct pricing per model
     users = {}
-    for row in result.get("results", []):
+    for row in raw_rows:
         fields = {f["field"]: f["value"] for f in row}
         arn = fields.get("identity.arn", "")
         if not arn:
@@ -108,10 +140,10 @@ fields identity.arn, modelId,
         if "@" not in email:
             continue
         model_id = fields.get("modelId", "")
-        inp        = float(fields.get("input_tokens", 0))
-        cache_read = float(fields.get("cache_read_tokens", 0))
-        cache_write = float(fields.get("cache_write_tokens", 0))
-        out        = float(fields.get("output_tokens", 0))
+        inp        = float(fields.get("input.inputTokenCount") or 0)
+        cache_read = float(fields.get("input.cacheReadInputTokenCount") or 0)
+        cache_write = float(fields.get("input.cacheWriteInputTokenCount") or 0)
+        out        = float(fields.get("output.outputTokenCount") or 0)
         total      = inp + cache_read + cache_write + out
         if total <= 0:
             continue

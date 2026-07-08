@@ -510,19 +510,45 @@ Resources:
       Name: Top Users by Token Usage
       Description: Find top 10 users by token consumption in the last 7 days with user identity attribution
       QueryString: !Sub |
-        WITH user_totals AS (
+        WITH priced_rows AS (
             SELECT
                 user_id,
                 user_email,
                 organization_id,
-                SUM(token_usage) as total_tokens,
-                COUNT(DISTINCT session_id) as session_count,
-                COUNT(DISTINCT CAST(from_unixtime(timestamp/1000) AS DATE)) as active_days
+                session_id,
+                timestamp,
+                token_usage,
+                token_usage *
+                  CASE
+                    WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                    WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                    WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                    WHEN model LIKE '%opus%' THEN 5.00
+                    WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                    WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                    WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                    WHEN model LIKE '%haiku%' THEN 1.00
+                    WHEN type = 'output' THEN 15.00
+                    WHEN type = 'cacheRead' THEN 0.30
+                    WHEN type = 'cacheCreation' THEN 3.75
+                    ELSE 3.00
+                  END / 1000000 as row_cost_usd
             FROM "${GlueDatabase}".metrics
             WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
                 AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
                               LPAD(CAST(MONTH(CURRENT_DATE - INTERVAL '1' MONTH) AS VARCHAR), 2, '0'))
                 AND from_unixtime(timestamp/1000) >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+        ),
+        user_totals AS (
+            SELECT
+                user_id,
+                user_email,
+                organization_id,
+                SUM(token_usage) as total_tokens,
+                SUM(row_cost_usd) as total_cost_usd,
+                COUNT(DISTINCT session_id) as session_count,
+                COUNT(DISTINCT CAST(from_unixtime(timestamp/1000) AS DATE)) as active_days
+            FROM priced_rows
             GROUP BY user_id, user_email, organization_id
         )
         SELECT
@@ -532,7 +558,7 @@ Resources:
             total_tokens,
             session_count,
             active_days,
-            ROUND(total_tokens * 0.000015, 2) as estimated_cost_usd
+            ROUND(total_cost_usd, 2) as estimated_cost_usd
         FROM user_totals
         ORDER BY total_tokens DESC
         LIMIT 10;
@@ -553,7 +579,21 @@ Resources:
             COUNT(DISTINCT user_id) as unique_users,
             COUNT(DISTINCT user_email) as unique_emails,
             COUNT(DISTINCT session_id) as total_sessions,
-            ROUND(SUM(token_usage) * 0.000015, 2) as estimated_cost_usd
+            ROUND(SUM(token_usage) *
+              CASE
+                WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                WHEN model LIKE '%opus%' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                WHEN model LIKE '%haiku%' THEN 1.00
+                WHEN type = 'output' THEN 15.00
+                WHEN type = 'cacheRead' THEN 0.30
+                WHEN type = 'cacheCreation' THEN 3.75
+                ELSE 3.00
+              END / 1000000, 2) as estimated_cost_usd
         FROM "${GlueDatabase}".metrics
         WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
             AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
@@ -602,7 +642,23 @@ Resources:
             SUM(CASE WHEN type = 'input' THEN token_usage ELSE 0 END) as input_tokens,
             SUM(CASE WHEN type = 'output' THEN token_usage ELSE 0 END) as output_tokens,
             SUM(token_usage) as total_tokens,
-            ROUND(SUM(token_usage) * 0.000015, 2) as estimated_cost_usd
+            ROUND(SUM(
+              token_usage *
+                CASE
+                  WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                  WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                  WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                  WHEN model LIKE '%opus%' THEN 5.00
+                  WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                  WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                  WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                  WHEN model LIKE '%haiku%' THEN 1.00
+                  WHEN type = 'output' THEN 15.00
+                  WHEN type = 'cacheRead' THEN 0.30
+                  WHEN type = 'cacheCreation' THEN 3.75
+                  ELSE 3.00
+                END / 1000000
+            ), 2) as estimated_cost_usd
         FROM "${GlueDatabase}".metrics
         WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
             AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
@@ -625,7 +681,22 @@ Resources:
             user_id,
             user_email,
             regexp_extract(user_email, '@([^@]+)$', 1) as email_domain,
-            token_usage
+            token_usage,
+            token_usage *
+              CASE
+                WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                WHEN model LIKE '%opus%' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                WHEN model LIKE '%haiku%' THEN 1.00
+                WHEN type = 'output' THEN 15.00
+                WHEN type = 'cacheRead' THEN 0.30
+                WHEN type = 'cacheCreation' THEN 3.75
+                ELSE 3.00
+              END / 1000000 as row_cost_usd
           FROM "${GlueDatabase}".metrics
           WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
             AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
@@ -640,7 +711,7 @@ Resources:
           COUNT(DISTINCT user_id) as unique_users,
           COUNT(DISTINCT user_email) as unique_emails,
           SUM(token_usage) as total_tokens,
-          ROUND(SUM(token_usage) * 0.000015, 2) as estimated_cost_usd
+          ROUND(SUM(row_cost_usd), 2) as estimated_cost_usd
         FROM email_domains
         GROUP BY email_domain
         ORDER BY total_tokens DESC;
@@ -695,18 +766,30 @@ Resources:
       Name: User Session Analysis
       Description: Analyze user sessions with duration and intensity metrics
       QueryString: !Sub |
-        WITH session_metrics AS (
+        WITH priced_rows AS (
           SELECT
             session_id,
             user_email,
             user_id,
             organization_id,
-            MIN(from_unixtime(timestamp/1000)) as session_start,
-            MAX(from_unixtime(timestamp/1000)) as session_end,
-            SUM(token_usage) as total_tokens,
-            COUNT(*) as api_calls,
-            COUNT(DISTINCT model) as models_used,
-            AVG(token_usage) as avg_tokens_per_call
+            model,
+            timestamp,
+            token_usage,
+            token_usage *
+              CASE
+                WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                WHEN model LIKE '%opus%' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                WHEN model LIKE '%haiku%' THEN 1.00
+                WHEN type = 'output' THEN 15.00
+                WHEN type = 'cacheRead' THEN 0.30
+                WHEN type = 'cacheCreation' THEN 3.75
+                ELSE 3.00
+              END / 1000000 as row_cost_usd
           FROM "${GlueDatabase}".metrics
           WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
             AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
@@ -715,6 +798,21 @@ Resources:
             AND from_unixtime(timestamp/1000) >= CURRENT_TIMESTAMP - INTERVAL '30' DAY
             AND session_id IS NOT NULL
             AND session_id <> ''
+        ),
+        session_metrics AS (
+          SELECT
+            session_id,
+            user_email,
+            user_id,
+            organization_id,
+            MIN(from_unixtime(timestamp/1000)) as session_start,
+            MAX(from_unixtime(timestamp/1000)) as session_end,
+            SUM(token_usage) as total_tokens,
+            SUM(row_cost_usd) as total_cost_usd,
+            COUNT(*) as api_calls,
+            COUNT(DISTINCT model) as models_used,
+            AVG(token_usage) as avg_tokens_per_call
+          FROM priced_rows
           GROUP BY session_id, user_email, user_id, organization_id
         )
         SELECT
@@ -729,7 +827,7 @@ Resources:
           models_used,
           ROUND(avg_tokens_per_call, 2) as avg_tokens_per_call,
           ROUND(total_tokens / greatest(date_diff('minute', session_start, session_end), 1), 2) as tokens_per_minute,
-          ROUND(total_tokens * 0.000015, 4) as session_cost_usd
+          ROUND(total_cost_usd, 4) as session_cost_usd
         FROM session_metrics
         WHERE date_diff('minute', session_start, session_end) > 0
         ORDER BY total_tokens DESC
@@ -752,14 +850,30 @@ Resources:
             model,
             type as token_type,
             SUM(token_usage) as tokens,
-            -- Approximate pricing per million tokens
+            -- Approximate pricing per million tokens, by model family and
+            -- token type (input/output/cacheRead/cacheCreation carry very
+            -- different rates — a single blended price misprices whichever
+            -- type dominates the row).
             CASE
-              WHEN model LIKE '%opus-4-6%' THEN 15.00
-              WHEN model LIKE '%opus-4-1%' THEN 15.00
-              WHEN model LIKE '%opus-4%' THEN 15.00
-              WHEN model LIKE '%sonnet-4%' THEN 3.00
-              WHEN model LIKE '%sonnet-3-7%' THEN 3.00
-              WHEN model LIKE '%haiku-3-5%' THEN 0.25
+              WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+              WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+              WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+              WHEN model LIKE '%opus%' THEN 5.00
+              WHEN model LIKE '%sonnet-3%' AND type = 'output' THEN 15.00
+              WHEN model LIKE '%sonnet-3%' AND type = 'cacheRead' THEN 0.30
+              WHEN model LIKE '%sonnet-3%' AND type = 'cacheCreation' THEN 3.75
+              WHEN model LIKE '%sonnet-3%' THEN 3.00
+              WHEN model LIKE '%sonnet%' AND type = 'output' THEN 15.00
+              WHEN model LIKE '%sonnet%' AND type = 'cacheRead' THEN 0.30
+              WHEN model LIKE '%sonnet%' AND type = 'cacheCreation' THEN 3.75
+              WHEN model LIKE '%sonnet%' THEN 3.00
+              WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+              WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+              WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+              WHEN model LIKE '%haiku%' THEN 1.00
+              WHEN type = 'output' THEN 15.00
+              WHEN type = 'cacheRead' THEN 0.30
+              WHEN type = 'cacheCreation' THEN 3.75
               ELSE 3.00
             END as price_per_million
           FROM "${GlueDatabase}".metrics
@@ -878,7 +992,22 @@ Resources:
               ELSE 'Unknown'
             END as identity_provider,
             token_usage,
-            type
+            type,
+            token_usage *
+              CASE
+                WHEN model LIKE '%opus%' AND type = 'output' THEN 25.00
+                WHEN model LIKE '%opus%' AND type = 'cacheRead' THEN 0.50
+                WHEN model LIKE '%opus%' AND type = 'cacheCreation' THEN 6.25
+                WHEN model LIKE '%opus%' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'output' THEN 5.00
+                WHEN model LIKE '%haiku%' AND type = 'cacheRead' THEN 0.10
+                WHEN model LIKE '%haiku%' AND type = 'cacheCreation' THEN 1.25
+                WHEN model LIKE '%haiku%' THEN 1.00
+                WHEN type = 'output' THEN 15.00
+                WHEN type = 'cacheRead' THEN 0.30
+                WHEN type = 'cacheCreation' THEN 3.75
+                ELSE 3.00
+              END / 1000000 as row_cost_usd
           FROM "${GlueDatabase}".metrics
           WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
             AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
@@ -892,7 +1021,7 @@ Resources:
           SUM(CASE WHEN type = 'input' THEN token_usage ELSE 0 END) as input_tokens,
           SUM(CASE WHEN type = 'output' THEN token_usage ELSE 0 END) as output_tokens,
           SUM(token_usage) as total_tokens,
-          ROUND(SUM(token_usage) * 0.000015, 2) as estimated_cost_usd
+          ROUND(SUM(row_cost_usd), 2) as estimated_cost_usd
         FROM user_providers
         GROUP BY identity_provider
         ORDER BY total_tokens DESC;
