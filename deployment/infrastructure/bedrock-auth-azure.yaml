@@ -49,6 +49,11 @@ Parameters:
       - 'false'
     Description: Enable CloudWatch monitoring for Bedrock usage
 
+  GuardrailAndProfileArns:
+    Type: CommaDelimitedList
+    Default: 'arn:aws:bedrock:eu-west-1:159860816451:guardrail/34uzaffhzbft,arn:aws:bedrock:eu-west-1:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:eu-central-1:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:eu-west-3:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:eu-north-1:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:eu-south-1:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:eu-south-2:159860816451:guardrail-profile/eu.guardrail.v1:0,arn:aws:bedrock:us-east-1:159860816451:guardrail/jykr3iptwyy6,arn:aws:bedrock:us-east-1:159860816451:guardrail-profile/us.guardrail.v1:0,arn:aws:bedrock:us-east-2:159860816451:guardrail-profile/us.guardrail.v1:0,arn:aws:bedrock:us-west-1:159860816451:guardrail-profile/us.guardrail.v1:0,arn:aws:bedrock:us-west-2:159860816451:guardrail-profile/us.guardrail.v1:0'
+    Description: Guardrail + guardrail-profile ARNs (both geographies) this role may apply via bedrock:ApplyGuardrail, matching bedrock-ai-iam-governance's config/common.json guardrail_arns
+
 Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
@@ -143,6 +148,11 @@ Resources:
               - 'bedrock:ListInferenceProfiles'
               - 'bedrock:GetInferenceProfile'
             Resource: '*'
+          - Sid: AllowBedrockApplyGuardrail
+            Effect: Allow
+            Action:
+              - 'bedrock:ApplyGuardrail'
+            Resource: !Ref GuardrailAndProfileArns
           - !If
             - MonitoringEnabled
             - Sid: AllowCloudWatchMetrics
